@@ -1,9 +1,115 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Spline+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 :root {
-  --font-display:
-    Spline Sans, Inter, ui-sans-serif, system-ui, sans-serif, Apple Color Emoji, Segoe UI Emoji,
-    Segoe UI Symbol, Noto Color Emoji;
-  --font-mono:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace;
-  --font-rounded: 'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif;
-  --font-serif: Georgia, 'Times New Roman', serif;
+  /* Typography Stacks */
+  --font-display: 'Spline Sans', 'Inter', system-ui, -apple-system, sans-serif;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+  /* Black Carbon Color Palette */
+  --bg-carbon-base: #09090b;        /* Ultra-dark base background */
+  --bg-carbon-surface: #121215;     /* Card / Panel base */
+  --bg-carbon-elevated: #1a1a1e;    /* Floating modals & menus */
+  --bg-carbon-hover: #24242a;       /* Interactive hover state */
+
+  /* Accents & Glows */
+  --accent-primary: #3b82f6;        /* Electric Blue accent */
+  --accent-primary-glow: rgba(59, 130, 246, 0.25);
+  --accent-cyan: #06b6d4;           /* Secondary Cyber Cyan */
+  --accent-emerald: #10b981;        /* Status Green */
+
+  /* Text Hierarchy */
+  --text-main: #f8fafc;             /* High contrast title text */
+  --text-muted: #94a3b8;            /* Secondary body text */
+  --text-subtle: #475569;           /* Disabled / Placeholder text */
+
+  /* Carbon Borders & Dividers */
+  --border-carbon: rgba(255, 255, 255, 0.07);
+  --border-carbon-light: rgba(255, 255, 255, 0.15);
+  --border-accent: rgba(59, 130, 246, 0.4);
+
+  /* Glassmorphism & Shadow Depth */
+  --glass-bg: rgba(18, 18, 21, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --shadow-carbon: 0 12px 32px -8px rgba(0, 0, 0, 0.85);
+  --shadow-glow: 0 0 20px var(--accent-primary-glow);
+
+  /* Border Radii & Animations */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --transition-smooth: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Global Reset & Base Setup */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  background-color: var(--bg-carbon-base);
+  color: var(--text-main);
+  font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  min-height: 100vh;
+}
+
+/* Carbon Fiber Geometric Background Pattern */
+body {
+  background-image: 
+    radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.08), transparent 45%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.015) 25%, transparent 25%),
+    linear-gradient(225deg, rgba(255, 255, 255, 0.015) 25%, transparent 25%),
+    linear-gradient(45deg, rgba(255, 255, 255, 0.015) 25%, transparent 25%),
+    linear-gradient(315deg, rgba(255, 255, 255, 0.015) 25%, #09090b 25%);
+  background-position: 0 0, 10px 0, 10px 0, 0 0, 0 0;
+  background-size: 100% 100%, 20px 20px, 20px 20px, 20px 20px, 20px 20px;
+  background-attachment: fixed;
+}
+
+/* Modern Glass Card Utility Class */
+.carbon-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-carbon);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-carbon);
+  transition: var(--transition-smooth);
+}
+
+.carbon-card:hover {
+  border-color: var(--border-carbon-light);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-carbon), var(--shadow-glow);
+}
+
+/* Sleek Carbon Scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-carbon-base);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-carbon-elevated);
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--bg-carbon-base);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-carbon-hover);
+}
+
+/* Active Text Selection */
+::selection {
+  background: var(--accent-primary);
+  color: #ffffff;
 }
