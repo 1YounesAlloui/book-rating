@@ -1,0 +1,23 @@
+# 1. Security (CRITICAL)
+.env
+*.pot
+*.py[co]
+
+# 2. Python / Django Cache
+__pycache__/
+db.sqlite3
+*.log
+
+# 3. Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+
+# 4. OS Generated Files
+.DS_Store
+Thumbs.db
+
+# 5. Static & Media (Collected files)
+staticfiles/
+media/
