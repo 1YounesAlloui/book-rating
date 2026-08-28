@@ -14,49 +14,72 @@ import { Ionicons } from '@expo/vector-icons';
 import { BookDetailModal, Book, BookStatus } from '../components/BookDetailModal';
 
 const BASE_URL =
-  Platform.OS === 'web'
-    ? 'http://localhost:8000/api'
-    : Platform.OS === 'android'
+  Platform.OS === 'android'
     ? 'http://10.0.2.2:8000/api'
     : 'http://localhost:8000/api';
 
+// ─── Design tokens ────────────────────────────────────────────────
+const GOLD    = '#c8a96e';
+const BG      = '#0d0d10';
+const SURFACE = '#111114';
+const BORDER  = 'rgba(255, 255, 255, 0.07)';
+const TEXT    = '#f0ede8';
+const MUTED   = '#5a5a6a';
+
 type TabType = 'TO_READ' | 'FINISHED' | 'FAVORITE';
 
+const TABS = [
+  {
+    key: 'TO_READ'  as const,
+    label: 'To Read',
+    icon: 'bookmark'         as const,
+    color: '#3b82f6',
+    activeBg:     'rgba(59,  130, 246, 0.12)',
+    activeBorder: 'rgba(59,  130, 246, 0.40)',
+    emptyMsg: 'Books you want to read will appear here.',
+  },
+  {
+    key: 'FINISHED' as const,
+    label: 'Finished',
+    icon: 'checkmark-circle' as const,
+    color: '#10b981',
+    activeBg:     'rgba(16,  185, 129, 0.12)',
+    activeBorder: 'rgba(16,  185, 129, 0.40)',
+    emptyMsg: "Books you've finished will show up here.",
+  },
+  {
+    key: 'FAVORITE' as const,
+    label: 'Favorites',
+    icon: 'heart'            as const,
+    color: '#ef4444',
+    activeBg:     'rgba(239, 68,  68,  0.12)',
+    activeBorder: 'rgba(239, 68,  68,  0.40)',
+    emptyMsg: 'Books you love will appear here.',
+  },
+] as const;
+
+// ─── Screen ───────────────────────────────────────────────────────
 export default function LibraryScreen() {
-  const [activeTab, setActiveTab] = useState<TabType>('TO_READ');
-  const [books, setBooks] = useState<Book[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-
+  const [activeTab, setActiveTab]   = useState<TabType>('TO_READ');
+  const [books, setBooks]           = useState<Book[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError]           = useState<string | null>(null);
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
-  const [modalVisible, setModalVisible] = useState<boolean>(false);
+  const [modalVisible, setModalVisible] = useState(false);
 
-  useEffect(() => {
-    fetchLibraryBooks();
-  }, []);
+  useEffect(() => { fetchLibrary(); }, []);
 
-  const fetchLibraryBooks = async () => {
+  const fetchLibrary = async () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(`${BASE_URL}/books/user/`);
-
-      // Handle 404 gracefully as an empty library state
-      if (response.status === 404) {
-        setBooks([]);
-        return;
-      }
-
-      if (!response.ok) {
-        console.error(`Library fetch failed status code: ${response.status}`);
-        throw new Error(`Server returned HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
+      const res = await fetch(`${BASE_URL}/books/user/`);
+      if (res.status === 404) { setBooks([]); return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
       setBooks(Array.isArray(data) ? data : []);
     } catch (err: any) {
-      console.error('Error loading library:', err.message);
       setError(`Unable to load library (${err.message}).`);
     } finally {
       setLoading(false);
@@ -64,170 +87,137 @@ export default function LibraryScreen() {
     }
   };
 
-  const handleRefresh = () => {
-    setRefreshing(true);
-    fetchLibraryBooks();
-  };
-
-  const handleStatusChange = async (bookId: string, newStatus: BookStatus) => {
-    setBooks((prevBooks) => {
-      if (!newStatus) {
-        return prevBooks.filter((b) => String(b.id) !== String(bookId));
-      }
-      return prevBooks.map((b) =>
-        String(b.id) === String(bookId) ? { ...b, status: newStatus } : b
+  const handleStatusChange = async (
+    bookId: string,
+    newStatus: BookStatus,
+    savedBook?: Book,
+  ) => {
+    // Optimistic update
+    setBooks((prev) => {
+      if (!newStatus) return prev.filter((b) => b.google_book_id !== bookId);
+      return prev.map((b) =>
+        b.google_book_id === bookId ? { ...(savedBook ?? b), status: newStatus } : b,
       );
     });
-
-    if (selectedBook && String(selectedBook.id) === String(bookId)) {
-      setSelectedBook((prev) => (prev ? { ...prev, status: newStatus } : null));
+    if (selectedBook?.google_book_id === bookId) {
+      setSelectedBook((prev) =>
+        prev ? { ...(savedBook ?? prev), status: newStatus } : null,
+      );
     }
-
+    // Sync to backend
     try {
-      const response = await fetch(`${BASE_URL}/books/${bookId}/status/`, {
+      const res = await fetch(`${BASE_URL}/books/${bookId}/status/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus }),
       });
-
-      if (!response.ok) {
-        throw new Error('Failed to update status on backend');
-      }
-    } catch (err) {
-      console.error('Error updating status:', err);
-      fetchLibraryBooks();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      fetchLibrary(); // Roll back
     }
   };
 
-  const filteredBooks = books.filter((b) => b.status === activeTab);
-  const getTabCount = (tab: TabType) => books.filter((b) => b.status === tab).length;
-
-  const formatCardAuthor = (authors?: string[] | string) => {
+  const formatAuthor = (authors?: string[] | string): string => {
     if (Array.isArray(authors) && authors.length > 0) return authors[0];
-    if (typeof authors === 'string' && authors.trim().length > 0) return authors;
+    if (typeof authors === 'string' && authors.trim()) return authors;
     return 'Unknown';
   };
 
-  const renderBookCard = ({ item }: { item: Book }) => (
+  const filtered  = books.filter((b) => b.status === activeTab);
+  const countFor  = (tab: TabType) => books.filter((b) => b.status === tab).length;
+  const activeConfig = TABS.find((t) => t.key === activeTab)!;
+
+  const renderCard = ({ item }: { item: Book }) => (
     <TouchableOpacity
       style={styles.card}
       activeOpacity={0.8}
-      onPress={() => {
-        setSelectedBook(item);
-        setModalVisible(true);
-      }}
+      onPress={() => { setSelectedBook(item); setModalVisible(true); }}
     >
       <View style={styles.cardCoverWrapper}>
-        {item.coverImage ? (
-          <Image source={{ uri: item.coverImage }} style={styles.cardCover} />
+        {item.thumbnail ? (
+          <Image source={{ uri: item.thumbnail }} style={styles.cardCover} resizeMode="cover" />
         ) : (
           <View style={[styles.cardCover, styles.placeholderCover]}>
-            <Ionicons name="book-outline" size={32} color="#475569" />
+            <Ionicons name="book-outline" size={28} color="#2e2e36" />
           </View>
         )}
       </View>
-
-      <View style={styles.cardDetails}>
-        <Text style={styles.cardTitle} numberOfLines={2}>
-          {item.title}
-        </Text>
-        <Text style={styles.cardAuthor} numberOfLines={1}>
-          {formatCardAuthor(item.authors)}
-        </Text>
-      </View>
+      <Text style={styles.cardTitle} numberOfLines={2}>{item.title}</Text>
+      <Text style={styles.cardAuthor} numberOfLines={1}>{formatAuthor(item.authors)}</Text>
     </TouchableOpacity>
   );
 
   return (
     <View style={styles.container}>
-      <Text style={styles.heading}>My Library</Text>
 
-      {/* Navigation Tabs */}
-      <View style={styles.tabsContainer}>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'TO_READ' && styles.tabActiveToRead]}
-          onPress={() => setActiveTab('TO_READ')}
-        >
-          <Ionicons
-            name={activeTab === 'TO_READ' ? 'bookmark' : 'bookmark-outline'}
-            size={16}
-            color={activeTab === 'TO_READ' ? '#3b82f6' : '#94a3b8'}
-          />
-          <Text style={[styles.tabText, activeTab === 'TO_READ' && styles.tabTextActiveToRead]}>
-            To Read ({getTabCount('TO_READ')})
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'FINISHED' && styles.tabActiveFinished]}
-          onPress={() => setActiveTab('FINISHED')}
-        >
-          <Ionicons
-            name={activeTab === 'FINISHED' ? 'checkmark-circle' : 'checkmark-circle-outline'}
-            size={16}
-            color={activeTab === 'FINISHED' ? '#10b981' : '#94a3b8'}
-          />
-          <Text style={[styles.tabText, activeTab === 'FINISHED' && styles.tabTextActiveFinished]}>
-            Finished ({getTabCount('FINISHED')})
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'FAVORITE' && styles.tabActiveFavorite]}
-          onPress={() => setActiveTab('FAVORITE')}
-        >
-          <Ionicons
-            name={activeTab === 'FAVORITE' ? 'heart' : 'heart-outline'}
-            size={16}
-            color={activeTab === 'FAVORITE' ? '#ef4444' : '#94a3b8'}
-          />
-          <Text style={[styles.tabText, activeTab === 'FAVORITE' && styles.tabTextActiveFavorite]}>
-            Favorites ({getTabCount('FAVORITE')})
-          </Text>
-        </TouchableOpacity>
+      {/* Tab switcher */}
+      <View style={styles.tabBar}>
+        {TABS.map((tab) => {
+          const active = activeTab === tab.key;
+          const count  = countFor(tab.key);
+          return (
+            <TouchableOpacity
+              key={tab.key}
+              style={[
+                styles.tab,
+                active && { backgroundColor: tab.activeBg, borderColor: tab.activeBorder },
+              ]}
+              onPress={() => setActiveTab(tab.key)}
+            >
+              <Ionicons
+                name={active ? tab.icon : (`${tab.icon}-outline` as any)}
+                size={14}
+                color={active ? tab.color : MUTED}
+              />
+              <Text style={[styles.tabLabel, active && { color: tab.color }]}>
+                {tab.label}
+              </Text>
+              {count > 0 && (
+                <View
+                  style={[
+                    styles.tabBadge,
+                    active && { backgroundColor: `${tab.color}28` },
+                  ]}
+                >
+                  <Text style={[styles.tabBadgeText, active && { color: tab.color }]}>
+                    {count}
+                  </Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
-      {/* Screen States */}
+      {/* Content states */}
       {loading ? (
         <View style={styles.centered}>
-          <ActivityIndicator size="large" color="#3b82f6" />
-          <Text style={styles.loadingText}>Loading your library...</Text>
+          <ActivityIndicator size="large" color={GOLD} />
+          <Text style={styles.stateText}>Loading your library…</Text>
         </View>
       ) : error ? (
         <View style={styles.centered}>
           <Ionicons name="alert-circle-outline" size={44} color="#ef4444" />
-          <Text style={styles.errorText}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={fetchLibraryBooks}>
+          <Text style={[styles.stateText, { color: TEXT }]}>{error}</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={fetchLibrary}>
             <Text style={styles.retryBtnText}>Retry</Text>
           </TouchableOpacity>
         </View>
-      ) : filteredBooks.length === 0 ? (
-        <View style={styles.emptyContainer}>
+      ) : filtered.length === 0 ? (
+        <View style={styles.centered}>
           <Ionicons
-            name={
-              activeTab === 'TO_READ'
-                ? 'bookmark-outline'
-                : activeTab === 'FINISHED'
-                ? 'checkmark-done-outline'
-                : 'heart-outline'
-            }
-            size={56}
-            color="#334155"
+            name={`${activeConfig.icon}-outline` as any}
+            size={52}
+            color="#1e1e25"
           />
-          <Text style={styles.emptyTitle}>No books here yet</Text>
-          <Text style={styles.emptySubtitle}>
-            {activeTab === 'TO_READ'
-              ? 'Books marked as "To Read" will appear here.'
-              : activeTab === 'FINISHED'
-              ? 'Books you complete will show up here.'
-              : 'Add books to your favorites to see them here.'}
-          </Text>
+          <Text style={styles.emptyTitle}>Nothing here yet</Text>
+          <Text style={styles.stateText}>{activeConfig.emptyMsg}</Text>
         </View>
       ) : (
         <FlatList
-          data={filteredBooks}
-          keyExtractor={(item, index) => `${item.id}-${index}`}
-          renderItem={renderBookCard}
+          data={filtered}
+          keyExtractor={(item) => item.google_book_id}
+          renderItem={renderCard}
           numColumns={2}
           columnWrapperStyle={styles.columnWrapper}
           contentContainerStyle={styles.listContent}
@@ -235,9 +225,9 @@ export default function LibraryScreen() {
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
-              onRefresh={handleRefresh}
-              tintColor="#3b82f6"
-              colors={['#3b82f6']}
+              onRefresh={() => { setRefreshing(true); fetchLibrary(); }}
+              tintColor={GOLD}
+              colors={[GOLD]}
             />
           }
         />
@@ -254,26 +244,18 @@ export default function LibraryScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#09090b',
-    paddingHorizontal: 16,
-    paddingTop: 50,
-  },
-  heading: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#f8fafc',
-    marginBottom: 16,
-  },
-  tabsContainer: {
+  container: { flex: 1, backgroundColor: BG, paddingTop: 14 },
+
+  // Tab switcher
+  tabBar: {
     flexDirection: 'row',
-    backgroundColor: '#121215',
-    padding: 4,
-    borderRadius: 12,
+    marginHorizontal: 16,
+    marginBottom: 18,
+    backgroundColor: SURFACE,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.07)',
-    marginBottom: 20,
+    borderColor: BORDER,
+    padding: 4,
     gap: 4,
   },
   tab: {
@@ -281,125 +263,87 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 8,
-    gap: 6,
-  },
-  tabActiveToRead: {
-    backgroundColor: 'rgba(59, 130, 246, 0.15)',
+    paddingVertical: 9,
+    borderRadius: 10,
+    gap: 5,
     borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.4)',
+    borderColor: 'transparent',
   },
-  tabActiveFinished: {
-    backgroundColor: 'rgba(16, 185, 129, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.4)',
-  },
-  tabActiveFavorite: {
-    backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.4)',
-  },
-  tabText: {
-    fontSize: 12,
+  tabLabel: {
+    fontSize: 11,
     fontWeight: '600',
-    color: '#94a3b8',
+    color: MUTED,
+    letterSpacing: 0.2,
   },
-  tabTextActiveToRead: {
-    color: '#3b82f6',
+  tabBadge: {
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.07)',
   },
-  tabTextActiveFinished: {
-    color: '#10b981',
+  tabBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: MUTED,
   },
-  tabTextActiveFavorite: {
-    color: '#ef4444',
+
+  // Cards
+  card: {
+    width: '48%',
+    backgroundColor: SURFACE,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: BORDER,
   },
+  cardCoverWrapper: {
+    width: '100%',
+    height: 190,
+    borderTopLeftRadius: 14,
+    borderTopRightRadius: 14,
+    overflow: 'hidden',
+  },
+  cardCover: { width: '100%', height: '100%' },
+  placeholderCover: {
+    backgroundColor: '#1a1a1f',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cardTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: TEXT,
+    marginTop: 9,
+    marginHorizontal: 10,
+    marginBottom: 3,
+    lineHeight: 18,
+  },
+  cardAuthor: { fontSize: 12, color: MUTED, marginHorizontal: 10, marginBottom: 10 },
+
+  // States
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 24,
   },
-  loadingText: {
-    color: '#94a3b8',
-    marginTop: 12,
-  },
-  errorText: {
-    color: '#f8fafc',
-    marginTop: 12,
-    textAlign: 'center',
+  stateText: { color: MUTED, marginTop: 10, textAlign: 'center', fontSize: 13 },
+  emptyTitle: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: TEXT,
+    marginTop: 14,
+    marginBottom: 6,
   },
   retryBtn: {
-    marginTop: 16,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: '#3b82f6',
-    borderRadius: 8,
+    marginTop: 20,
+    paddingHorizontal: 28,
+    paddingVertical: 11,
+    backgroundColor: GOLD,
+    borderRadius: 10,
   },
-  retryBtnText: {
-    color: '#ffffff',
-    fontWeight: '600',
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 32,
-    paddingBottom: 60,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#f8fafc',
-    marginTop: 12,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: '#64748b',
-    textAlign: 'center',
-    marginTop: 6,
-  },
-  listContent: {
-    paddingBottom: 24,
-  },
-  columnWrapper: {
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  card: {
-    width: '48%',
-    backgroundColor: '#121215',
-    borderRadius: 12,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.07)',
-  },
-  cardCoverWrapper: {
-    width: '100%',
-    height: 180,
-    borderRadius: 8,
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  cardCover: {
-    width: '100%',
-    height: '100%',
-  },
-  placeholderCover: {
-    backgroundColor: '#1a1a1e',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cardDetails: {
-    flex: 1,
-  },
-  cardTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#f8fafc',
-    marginBottom: 4,
-  },
-  cardAuthor: {
-    fontSize: 12,
-    color: '#94a3b8',
-  },
+  retryBtnText: { color: '#0d0d10', fontWeight: '700', fontSize: 14 },
+
+  // List
+  listContent: { paddingHorizontal: 16, paddingBottom: 24 },
+  columnWrapper: { justifyContent: 'space-between', marginBottom: 14 },
 });

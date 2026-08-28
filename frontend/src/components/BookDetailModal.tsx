@@ -8,27 +8,37 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 export type BookStatus = 'TO_READ' | 'FINISHED' | 'FAVORITE' | null;
 
+// Covers both search results (from Google Books) and shelved books (from UserBookSerializer)
 export interface Book {
-  id: string;
+  id?: number;                 // UserBook Django PK — only present on shelved books
+  google_book_id: string;      // Always present — Google's string ID
   title: string;
-  authors?: string[] | string;
+  authors?: string;
   description?: string;
-  coverImage?: string;
+  thumbnail?: string;
+  categories?: string;
   status?: BookStatus;
   rating?: number;
+  updated_at?: string;
 }
 
 interface BookDetailModalProps {
   visible: boolean;
   book: Book | null;
   onClose: () => void;
-  onStatusChange: (bookId: string, newStatus: BookStatus) => Promise<void>;
+  onStatusChange: (googleBookId: string, newStatus: BookStatus, savedBook?: Book) => Promise<void>;
 }
+
+const BASE_URL =
+  Platform.OS === 'android'
+    ? 'http://10.0.2.2:8000/api'
+    : 'http://localhost:8000/api';
 
 export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   visible,
@@ -38,10 +48,17 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 }) => {
   const [currentStatus, setCurrentStatus] = useState<BookStatus>(null);
   const [loadingStatus, setLoadingStatus] = useState<BookStatus>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Track the Django id once the book has been saved for the first time
+  // (so subsequent taps in the same modal session don't try to re-save)
+  const [savedBookId, setSavedBookId] = useState<number | undefined>(undefined);
 
   useEffect(() => {
     if (book) {
-      setCurrentStatus(book.status || null);
+      setCurrentStatus(book.status ?? null);
+      setSavedBookId(book.id);
+      setErrorMsg(null);
     }
   }, [book]);
 
@@ -49,35 +66,111 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 
   const handlePressStatus = async (targetStatus: 'TO_READ' | 'FINISHED' | 'FAVORITE') => {
     const nextStatus: BookStatus = currentStatus === targetStatus ? null : targetStatus;
+    const previousStatus = currentStatus;
 
     setCurrentStatus(nextStatus);
     setLoadingStatus(targetStatus);
+    setErrorMsg(null);
 
     try {
-      await onStatusChange(book.id, nextStatus);
-    } catch (error) {
-      setCurrentStatus(book.status || null);
+      if (!savedBookId) {
+        // Book is from search/home — not in DB yet.
+
+        if (nextStatus === null) {
+          // Toggling off an unsaved book — nothing to persist, just clear UI state
+          return;
+        }
+
+        // Save to DB for the first time
+        await saveNewBook(book, nextStatus);
+      } else {
+        // Book is already shelved — just update its status (null = remove from shelf)
+        await onStatusChange(book.google_book_id, nextStatus);
+      }
+    } catch (err: any) {
+      // Roll back on failure
+      setCurrentStatus(previousStatus);
+      setErrorMsg('Failed to update shelf. Try again.');
+      console.error('handlePressStatus error:', err.message);
     } finally {
       setLoadingStatus(null);
     }
   };
 
-  // Helper to format authors safely whether backend returns Array, string, or undefined
-  const formatAuthors = (authors?: string[] | string) => {
-    if (Array.isArray(authors)) {
-      return authors.length > 0 ? authors.join(', ') : 'Unknown Author';
+  const saveNewBook = async (b: Book, newStatus: BookStatus) => {
+    const response = await fetch(`${BASE_URL}/books/save/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        google_book_id: b.google_book_id,
+        title: b.title,
+        authors: b.authors ?? '',
+        description: b.description ?? '',
+        thumbnail: b.thumbnail ?? '',
+        categories: b.categories ?? '',
+        status: newStatus,
+        rating: b.rating ?? 0,
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      console.error('Save error body:', body);
+      throw new Error(`HTTP ${response.status}`);
     }
-    if (typeof authors === 'string' && authors.trim().length > 0) {
-      return authors;
-    }
-    return 'Unknown Author';
+
+    const saved: Book = await response.json();
+    console.log('[SAVE] Book saved to shelf:', saved);
+
+    // Cache the Django id locally so subsequent taps use PATCH instead of POST
+    setSavedBookId(saved.id);
+
+    // Notify parent with the full saved object so it can update its list state
+    await onStatusChange(saved.google_book_id, newStatus, saved);
   };
 
+  const formatAuthors = (authors?: string): string => {
+    if (!authors || authors.trim().length === 0) return 'Unknown Author';
+    return authors;
+  };
+
+  const SHELF_BUTTONS = [
+    {
+      key: 'TO_READ' as const,
+      label: 'To Read',
+      icon: 'bookmark' as const,
+      color: '#3b82f6',
+      activeStyle: styles.statusButtonActiveToRead,
+      activeTextStyle: styles.statusTextActiveToRead,
+    },
+    {
+      key: 'FINISHED' as const,
+      label: 'Finished',
+      icon: 'checkmark-circle' as const,
+      color: '#10b981',
+      activeStyle: styles.statusButtonActiveFinished,
+      activeTextStyle: styles.statusTextActiveFinished,
+    },
+    {
+      key: 'FAVORITE' as const,
+      label: 'Favorite',
+      icon: 'heart' as const,
+      color: '#ef4444',
+      activeStyle: styles.statusButtonActiveFavorite,
+      activeTextStyle: styles.statusTextActiveFavorite,
+    },
+  ] as const;
+
   return (
-    <Modal visible={visible} animationType="slide" transparent={true} onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent={true}
+      onRequestClose={onClose}
+    >
       <View style={styles.overlay}>
         <View style={styles.modalContainer}>
-          {/* Header Bar */}
+          {/* Header */}
           <View style={styles.header}>
             <Text style={styles.headerTitle} numberOfLines={1}>
               Book Details
@@ -87,11 +180,18 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
             </TouchableOpacity>
           </View>
 
-          <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-            {/* Book Cover */}
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Cover */}
             <View style={styles.coverWrapper}>
-              {book.coverImage ? (
-                <Image source={{ uri: book.coverImage }} style={styles.coverImage} resizeMode="cover" />
+              {book.thumbnail ? (
+                <Image
+                  source={{ uri: book.thumbnail }}
+                  style={styles.coverImage}
+                  resizeMode="cover"
+                />
               ) : (
                 <View style={[styles.coverImage, styles.placeholderCover]}>
                   <Ionicons name="book-outline" size={48} color="#475569" />
@@ -99,110 +199,51 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
               )}
             </View>
 
-            {/* Book Info */}
+            {/* Info */}
             <Text style={styles.title}>{book.title}</Text>
             <Text style={styles.author}>{formatAuthors(book.authors)}</Text>
 
-            {/* Interactive Shelf Buttons */}
+            {/* Error message */}
+            {errorMsg && (
+              <Text style={styles.errorText}>{errorMsg}</Text>
+            )}
+
+            {/* Shelf Buttons */}
             <View style={styles.actionContainer}>
-              {/* TO READ */}
-              <TouchableOpacity
-                style={[
-                  styles.statusButton,
-                  currentStatus === 'TO_READ' && styles.statusButtonActiveToRead,
-                ]}
-                onPress={() => handlePressStatus('TO_READ')}
-                disabled={loadingStatus !== null}
-              >
-                {loadingStatus === 'TO_READ' ? (
-                  <ActivityIndicator size="small" color="#3b82f6" />
-                ) : (
-                  <>
-                    <Ionicons
-                      name={currentStatus === 'TO_READ' ? 'bookmark' : 'bookmark-outline'}
-                      size={18}
-                      color={currentStatus === 'TO_READ' ? '#3b82f6' : '#94a3b8'}
-                    />
-                    <Text
-                      style={[
-                        styles.statusText,
-                        currentStatus === 'TO_READ' && styles.statusTextActive,
-                      ]}
-                    >
-                      To Read
-                    </Text>
-                  </>
-                )}
-              </TouchableOpacity>
-
-              {/* FINISHED */}
-              <TouchableOpacity
-                style={[
-                  styles.statusButton,
-                  currentStatus === 'FINISHED' && styles.statusButtonActiveFinished,
-                ]}
-                onPress={() => handlePressStatus('FINISHED')}
-                disabled={loadingStatus !== null}
-              >
-                {loadingStatus === 'FINISHED' ? (
-                  <ActivityIndicator size="small" color="#10b981" />
-                ) : (
-                  <>
-                    <Ionicons
-                      name={
-                        currentStatus === 'FINISHED' ? 'checkmark-circle' : 'checkmark-circle-outline'
-                      }
-                      size={18}
-                      color={currentStatus === 'FINISHED' ? '#10b981' : '#94a3b8'}
-                    />
-                    <Text
-                      style={[
-                        styles.statusText,
-                        currentStatus === 'FINISHED' && styles.statusTextActiveFinished,
-                      ]}
-                    >
-                      Finished
-                    </Text>
-                  </>
-                )}
-              </TouchableOpacity>
-
-              {/* FAVORITE */}
-              <TouchableOpacity
-                style={[
-                  styles.statusButton,
-                  currentStatus === 'FAVORITE' && styles.statusButtonActiveFavorite,
-                ]}
-                onPress={() => handlePressStatus('FAVORITE')}
-                disabled={loadingStatus !== null}
-              >
-                {loadingStatus === 'FAVORITE' ? (
-                  <ActivityIndicator size="small" color="#ef4444" />
-                ) : (
-                  <>
-                    <Ionicons
-                      name={currentStatus === 'FAVORITE' ? 'heart' : 'heart-outline'}
-                      size={18}
-                      color={currentStatus === 'FAVORITE' ? '#ef4444' : '#94a3b8'}
-                    />
-                    <Text
-                      style={[
-                        styles.statusText,
-                        currentStatus === 'FAVORITE' && styles.statusTextActiveFavorite,
-                      ]}
-                    >
-                      Favorite
-                    </Text>
-                  </>
-                )}
-              </TouchableOpacity>
+              {SHELF_BUTTONS.map(({ key, label, icon, color, activeStyle, activeTextStyle }) => {
+                const isActive = currentStatus === key;
+                const isLoading = loadingStatus === key;
+                return (
+                  <TouchableOpacity
+                    key={key}
+                    style={[styles.statusButton, isActive && activeStyle]}
+                    onPress={() => handlePressStatus(key)}
+                    disabled={loadingStatus !== null}
+                  >
+                    {isLoading ? (
+                      <ActivityIndicator size="small" color={color} />
+                    ) : (
+                      <>
+                        <Ionicons
+                          name={isActive ? icon : (`${icon}-outline` as any)}
+                          size={18}
+                          color={isActive ? color : '#94a3b8'}
+                        />
+                        <Text style={[styles.statusText, isActive && activeTextStyle]}>
+                          {label}
+                        </Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
             </View>
 
             {/* Description */}
             <View style={styles.descriptionSection}>
               <Text style={styles.sectionHeading}>Description</Text>
               <Text style={styles.descriptionText}>
-                {book.description || 'No description available for this book.'}
+                {book.description?.trim() || 'No description available for this book.'}
               </Text>
             </View>
           </ScrollView>
@@ -241,9 +282,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  closeButton: {
-    padding: 4,
-  },
+  closeButton: { padding: 4 },
   scrollContent: {
     padding: 20,
     alignItems: 'center',
@@ -278,6 +317,12 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     textAlign: 'center',
     marginBottom: 20,
+  },
+  errorText: {
+    color: '#ef4444',
+    fontSize: 13,
+    marginBottom: 12,
+    textAlign: 'center',
   },
   actionContainer: {
     flexDirection: 'row',
@@ -316,15 +361,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
-  statusTextActive: {
-    color: '#3b82f6',
-  },
-  statusTextActiveFinished: {
-    color: '#10b981',
-  },
-  statusTextActiveFavorite: {
-    color: '#ef4444',
-  },
+  statusTextActiveToRead: { color: '#3b82f6' },
+  statusTextActiveFinished: { color: '#10b981' },
+  statusTextActiveFavorite: { color: '#ef4444' },
   descriptionSection: {
     width: '100%',
     marginTop: 8,
