@@ -27,6 +27,13 @@
         "projectId": "0f7f8ca1-2c50-4334-9492-d274b28db70d"
       }
     },
-    "owner": "ayounes55"
+    "owner": "ayounes55",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/0f7f8ca1-2c50-4334-9492-d274b28db70d"
+    },
+    "ios": {}
   }
 }
