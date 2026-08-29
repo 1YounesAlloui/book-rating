@@ -1,84 +1,78 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   FlatList,
-  Image,
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
-  Platform,
   RefreshControl,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { BookDetailModal, Book, BookStatus } from '../components/BookDetailModal';
-
-const BASE_URL =
-  Platform.OS === 'android'
-    ? 'http://10.0.2.2:8000/api'
-    : 'http://localhost:8000/api';
-
-// ─── Design tokens ────────────────────────────────────────────────
-const GOLD    = '#c8a96e';
-const BG      = '#0d0d10';
-const SURFACE = '#111114';
-const BORDER  = 'rgba(255, 255, 255, 0.07)';
-const TEXT    = '#f0ede8';
-const MUTED   = '#5a5a6a';
+import { BookCard, GOLD, BG, SURFACE, BORDER, TEXT, MUTED } from '../components/BookCard';
+import { fetchUserLibrary, updateShelfStatus } from '../services/api';
 
 type TabType = 'TO_READ' | 'FINISHED' | 'FAVORITE';
 
 const TABS = [
   {
-    key: 'TO_READ'  as const,
+    key: 'TO_READ' as const,
     label: 'To Read',
-    icon: 'bookmark'         as const,
+    icon: 'bookmark' as const,
     color: '#3b82f6',
-    activeBg:     'rgba(59,  130, 246, 0.12)',
-    activeBorder: 'rgba(59,  130, 246, 0.40)',
-    emptyMsg: 'Books you want to read will appear here.',
+    activeBg: 'rgba(59, 130, 246, 0.14)',
+    activeBorder: '#3b82f6',
+    emptyTitle: 'No books on your To-Read shelf',
+    emptyMsg: 'Explore trending titles and add books you plan to read.',
   },
   {
     key: 'FINISHED' as const,
     label: 'Finished',
     icon: 'checkmark-circle' as const,
     color: '#10b981',
-    activeBg:     'rgba(16,  185, 129, 0.12)',
-    activeBorder: 'rgba(16,  185, 129, 0.40)',
-    emptyMsg: "Books you've finished will show up here.",
+    activeBg: 'rgba(16, 185, 129, 0.14)',
+    activeBorder: '#10b981',
+    emptyTitle: 'No finished books yet',
+    emptyMsg: 'Keep track of the books you have completed reading here.',
   },
   {
     key: 'FAVORITE' as const,
     label: 'Favorites',
-    icon: 'heart'            as const,
+    icon: 'heart' as const,
     color: '#ef4444',
-    activeBg:     'rgba(239, 68,  68,  0.12)',
-    activeBorder: 'rgba(239, 68,  68,  0.40)',
-    emptyMsg: 'Books you love will appear here.',
+    activeBg: 'rgba(239, 68, 68, 0.14)',
+    activeBorder: '#ef4444',
+    emptyTitle: 'No favorites saved',
+    emptyMsg: 'Heart the books you cherish most to create your hall of fame.',
   },
 ] as const;
 
-// ─── Screen ───────────────────────────────────────────────────────
 export default function LibraryScreen() {
-  const [activeTab, setActiveTab]   = useState<TabType>('TO_READ');
-  const [books, setBooks]           = useState<Book[]>([]);
-  const [loading, setLoading]       = useState(true);
+  const router = useRouter();
+  const [activeTab, setActiveTab] = useState<TabType>('TO_READ');
+  const [books, setBooks] = useState<Book[]>([]);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError]           = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
 
-  useEffect(() => { fetchLibrary(); }, []);
+  useEffect(() => {
+    loadLibrary(false);
+  }, []);
 
-  const fetchLibrary = async () => {
+  const loadLibrary = async (isRefresh = false) => {
     try {
-      setLoading(true);
+      if (isRefresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
       setError(null);
-      const res = await fetch(`${BASE_URL}/books/user/`);
-      if (res.status === 404) { setBooks([]); return; }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setBooks(Array.isArray(data) ? data : []);
+      const data = await fetchUserLibrary();
+      setBooks(data);
     } catch (err: any) {
       setError(`Unable to load library (${err.message}).`);
     } finally {
@@ -90,96 +84,87 @@ export default function LibraryScreen() {
   const handleStatusChange = async (
     bookId: string,
     newStatus: BookStatus,
-    savedBook?: Book,
+    savedBook?: Book
   ) => {
     // Optimistic update
     setBooks((prev) => {
       if (!newStatus) return prev.filter((b) => b.google_book_id !== bookId);
       return prev.map((b) =>
-        b.google_book_id === bookId ? { ...(savedBook ?? b), status: newStatus } : b,
+        b.google_book_id === bookId ? { ...(savedBook ?? b), status: newStatus } : b
       );
     });
+
     if (selectedBook?.google_book_id === bookId) {
       setSelectedBook((prev) =>
-        prev ? { ...(savedBook ?? prev), status: newStatus } : null,
+        prev ? { ...(savedBook ?? prev), status: newStatus } : null
       );
     }
-    // Sync to backend
+
+    // Sync status change to backend
     try {
-      const res = await fetch(`${BASE_URL}/books/${bookId}/status/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await updateShelfStatus(bookId, newStatus);
     } catch {
-      fetchLibrary(); // Roll back
+      loadLibrary(false); // Roll back on failure
     }
   };
 
-  const formatAuthor = (authors?: string[] | string): string => {
-    if (Array.isArray(authors) && authors.length > 0) return authors[0];
-    if (typeof authors === 'string' && authors.trim()) return authors;
-    return 'Unknown';
-  };
-
-  const filtered  = books.filter((b) => b.status === activeTab);
-  const countFor  = (tab: TabType) => books.filter((b) => b.status === tab).length;
+  const filtered = books.filter((b) => b.status === activeTab);
+  const countFor = (tab: TabType) => books.filter((b) => b.status === tab).length;
   const activeConfig = TABS.find((t) => t.key === activeTab)!;
 
-  const renderCard = ({ item }: { item: Book }) => (
-    <TouchableOpacity
-      style={styles.card}
-      activeOpacity={0.8}
-      onPress={() => { setSelectedBook(item); setModalVisible(true); }}
-    >
-      <View style={styles.cardCoverWrapper}>
-        {item.thumbnail ? (
-          <Image source={{ uri: item.thumbnail }} style={styles.cardCover} resizeMode="cover" />
-        ) : (
-          <View style={[styles.cardCover, styles.placeholderCover]}>
-            <Ionicons name="book-outline" size={28} color="#2e2e36" />
-          </View>
-        )}
-      </View>
-      <Text style={styles.cardTitle} numberOfLines={2}>{item.title}</Text>
-      <Text style={styles.cardAuthor} numberOfLines={1}>{formatAuthor(item.authors)}</Text>
-    </TouchableOpacity>
+  const handleCardPress = useCallback((book: Book) => {
+    setSelectedBook(book);
+    setModalVisible(true);
+  }, []);
+
+  const renderCard = useCallback(
+    ({ item }: { item: Book }) => (
+      <BookCard item={item} onPress={handleCardPress} variant="grid4" />
+    ),
+    [handleCardPress]
   );
 
   return (
     <View style={styles.container}>
-
-      {/* Tab switcher */}
+      {/* Tab Switcher */}
       <View style={styles.tabBar}>
         {TABS.map((tab) => {
           const active = activeTab === tab.key;
-          const count  = countFor(tab.key);
+          const count = countFor(tab.key);
           return (
             <TouchableOpacity
               key={tab.key}
               style={[
                 styles.tab,
-                active && { backgroundColor: tab.activeBg, borderColor: tab.activeBorder },
+                active && {
+                  backgroundColor: tab.activeBg,
+                  borderColor: tab.activeBorder,
+                },
               ]}
               onPress={() => setActiveTab(tab.key)}
+              activeOpacity={0.8}
             >
               <Ionicons
                 name={active ? tab.icon : (`${tab.icon}-outline` as any)}
                 size={14}
                 color={active ? tab.color : MUTED}
               />
-              <Text style={[styles.tabLabel, active && { color: tab.color }]}>
+              <Text style={[styles.tabLabel, active && { color: tab.color, fontWeight: '700' }]}>
                 {tab.label}
               </Text>
               {count > 0 && (
                 <View
                   style={[
                     styles.tabBadge,
-                    active && { backgroundColor: `${tab.color}28` },
+                    active && { backgroundColor: `${tab.color}25` },
                   ]}
                 >
-                  <Text style={[styles.tabBadgeText, active && { color: tab.color }]}>
+                  <Text
+                    style={[
+                      styles.tabBadgeText,
+                      active && { color: tab.color, fontWeight: '700' },
+                    ]}
+                  >
                     {count}
                   </Text>
                 </View>
@@ -193,39 +178,49 @@ export default function LibraryScreen() {
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={GOLD} />
-          <Text style={styles.stateText}>Loading your library…</Text>
+          <Text style={styles.stateText}>Accessing your personal library…</Text>
         </View>
       ) : error ? (
         <View style={styles.centered}>
           <Ionicons name="alert-circle-outline" size={44} color="#ef4444" />
-          <Text style={[styles.stateText, { color: TEXT }]}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={fetchLibrary}>
+          <Text style={[styles.stateText, { color: TEXT, marginBottom: 16 }]}>{error}</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => loadLibrary(false)}>
             <Text style={styles.retryBtnText}>Retry</Text>
           </TouchableOpacity>
         </View>
       ) : filtered.length === 0 ? (
         <View style={styles.centered}>
-          <Ionicons
-            name={`${activeConfig.icon}-outline` as any}
-            size={52}
-            color="#1e1e25"
-          />
-          <Text style={styles.emptyTitle}>Nothing here yet</Text>
+          <View style={[styles.emptyIconBg, { backgroundColor: `${activeConfig.color}15` }]}>
+            <Ionicons
+              name={`${activeConfig.icon}-outline` as any}
+              size={48}
+              color={activeConfig.color}
+            />
+          </View>
+          <Text style={styles.emptyTitle}>{activeConfig.emptyTitle}</Text>
           <Text style={styles.stateText}>{activeConfig.emptyMsg}</Text>
+          <TouchableOpacity
+            style={styles.exploreBtn}
+            onPress={() => router.push('/explore')}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="compass-outline" size={16} color={BG} />
+            <Text style={styles.exploreBtnText}>Discover Books</Text>
+          </TouchableOpacity>
         </View>
       ) : (
         <FlatList
           data={filtered}
           keyExtractor={(item) => item.google_book_id}
           renderItem={renderCard}
-          numColumns={2}
+          numColumns={4}
           columnWrapperStyle={styles.columnWrapper}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
-              onRefresh={() => { setRefreshing(true); fetchLibrary(); }}
+              onRefresh={() => loadLibrary(true)}
               tintColor={GOLD}
               colors={[GOLD]}
             />
@@ -246,11 +241,10 @@ export default function LibraryScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: BG, paddingTop: 14 },
 
-  // Tab switcher
   tabBar: {
     flexDirection: 'row',
     marginHorizontal: 16,
-    marginBottom: 18,
+    marginBottom: 16,
     backgroundColor: SURFACE,
     borderRadius: 14,
     borderWidth: 1,
@@ -265,7 +259,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 9,
     borderRadius: 10,
-    gap: 5,
+    gap: 4,
     borderWidth: 1,
     borderColor: 'transparent',
   },
@@ -273,13 +267,13 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     color: MUTED,
-    letterSpacing: 0.2,
+    letterSpacing: 0.1,
   },
   tabBadge: {
     paddingHorizontal: 5,
     paddingVertical: 1,
     borderRadius: 6,
-    backgroundColor: 'rgba(255, 255, 255, 0.07)',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
   },
   tabBadgeText: {
     fontSize: 10,
@@ -287,63 +281,55 @@ const styles = StyleSheet.create({
     color: MUTED,
   },
 
-  // Cards
-  card: {
-    width: '48%',
-    backgroundColor: SURFACE,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  cardCoverWrapper: {
-    width: '100%',
-    height: 190,
-    borderTopLeftRadius: 14,
-    borderTopRightRadius: 14,
-    overflow: 'hidden',
-  },
-  cardCover: { width: '100%', height: '100%' },
-  placeholderCover: {
-    backgroundColor: '#1a1a1f',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cardTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: TEXT,
-    marginTop: 9,
-    marginHorizontal: 10,
-    marginBottom: 3,
-    lineHeight: 18,
-  },
-  cardAuthor: { fontSize: 12, color: MUTED, marginHorizontal: 10, marginBottom: 10 },
-
-  // States
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
+    paddingBottom: 110,
   },
-  stateText: { color: MUTED, marginTop: 10, textAlign: 'center', fontSize: 13 },
+  stateText: { color: MUTED, marginTop: 8, textAlign: 'center', fontSize: 13, maxWidth: 280 },
+  emptyIconBg: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
   emptyTitle: {
     fontSize: 17,
-    fontWeight: '600',
+    fontWeight: '700',
     color: TEXT,
-    marginTop: 14,
-    marginBottom: 6,
+    marginTop: 6,
+    marginBottom: 4,
+    textAlign: 'center',
   },
-  retryBtn: {
+  exploreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     marginTop: 20,
+    paddingHorizontal: 22,
+    paddingVertical: 11,
+    backgroundColor: GOLD,
+    borderRadius: 12,
+  },
+  exploreBtnText: { color: BG, fontWeight: '700', fontSize: 14 },
+  retryBtn: {
     paddingHorizontal: 28,
     paddingVertical: 11,
     backgroundColor: GOLD,
     borderRadius: 10,
   },
-  retryBtnText: { color: '#0d0d10', fontWeight: '700', fontSize: 14 },
+  retryBtnText: { color: BG, fontWeight: '700', fontSize: 14 },
 
-  // List
-  listContent: { paddingHorizontal: 16, paddingBottom: 24 },
-  columnWrapper: { justifyContent: 'space-between', marginBottom: 14 },
+  listContent: {
+    paddingHorizontal: 12,
+    paddingBottom: 110,
+  },
+  columnWrapper: {
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
 });

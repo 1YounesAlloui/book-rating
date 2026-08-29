@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   View,
   Text,
   TextInput,
   FlatList,
-  Image,
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
@@ -15,33 +14,48 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { BookDetailModal, Book, BookStatus } from '../components/BookDetailModal';
-
-const BASE_URL =
-  Platform.OS === 'android'
-    ? 'http://10.0.2.2:8000/api'
-    : 'http://localhost:8000/api';
-
-// ─── Design Tokens ────────────────────────────────────────────────
-const GOLD    = '#c8a96e';
-const BG      = '#0d0d10';
-const SURFACE = '#111114';
-const BORDER  = 'rgba(255, 255, 255, 0.07)';
-const TEXT    = '#f0ede8';
-const MUTED   = '#5a5a6a';
+import { BookCard, GOLD, BG, SURFACE, SURFACE_LIGHT, BORDER, TEXT, MUTED } from '../components/BookCard';
+import { searchBooks } from '../services/api';
 
 const CATEGORIES = [
-  'All', 'Fiction', 'Technology', 'Philosophy',
-  'Science', 'History', 'Psychology', 'Business',
-  'Biography', 'Mystery', 'Fantasy', 'Self Help',
+  'All',
+  'Politics',
+  'Geopolitics',
+  'Geography',
+  'Fiction',
+  'Technology',
+  'Philosophy',
+  'Science',
+  'History',
+  'Psychology',
+  'Business',
+  'Biography',
+  'Mystery',
+  'Fantasy',
+  'Self Help',
 ];
 
 const WRITING_STYLES = [
-  'All', 'Literary', 'Dark', 'Lighthearted', 
-  'Academic', 'Poetic', 'Thriller'
+  'All',
+  'Literary',
+  'Analytical',
+  'Dark',
+  'Lighthearted',
+  'Academic',
+  'Poetic',
+  'Thriller',
+  'Philosophical',
 ];
 
 const NOVEL_TYPES = [
-  'All', 'Novel', 'Series', 'Short Stories', 'Graphic Novel'
+  'All',
+  'Novel',
+  'Series',
+  'Short Stories',
+  'Graphic Novel',
+  'Non-Fiction',
+  'Essay / Treatise',
+  'Biography / Memoir',
 ];
 
 type SortOption = 'relevance' | 'newest';
@@ -60,35 +74,33 @@ const DEFAULT_FILTERS: FilterOptions = {
   novelType: 'All',
 };
 
-const STATUS_COLORS: Record<string, string> = {
-  TO_READ: '#3b82f6',
-  FINISHED: '#10b981',
-  FAVORITE: '#ef4444',
-};
-
-const STATUS_ICONS: Record<string, React.ComponentProps<typeof Ionicons>['name']> = {
-  TO_READ: 'bookmark',
-  FINISHED: 'checkmark-circle',
-  FAVORITE: 'heart',
-};
-
-// ─── Component ────────────────────────────────────────────────────
 export default function ExploreScreen() {
   const [query, setQuery] = useState('');
   const [focused, setFocused] = useState(false);
   const [category, setCategory] = useState('All');
-  const [rawResults, setRawResults] = useState<Book[]>([]);
+  
+  // Results & Pagination
+  const [books, setBooks] = useState<Book[]>([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Modals
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
-
-  // Filter Modal State
   const [filterModalVisible, setFilterModalVisible] = useState(false);
+
+  // Filter State
   const [activeFilters, setActiveFilters] = useState<FilterOptions>(DEFAULT_FILTERS);
   const [tempFilters, setTempFilters] = useState<FilterOptions>(DEFAULT_FILTERS);
 
-  // Check if non-default filters are applied
+  // Ref for active AbortController to cancel previous in-flight requests
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Check if non-default filters are active
   const isFilterActive = useMemo(() => {
     return (
       activeFilters.sortBy !== DEFAULT_FILTERS.sortBy ||
@@ -98,75 +110,123 @@ export default function ExploreScreen() {
     );
   }, [activeFilters]);
 
-  // Sync category pill selection with API fetch & active filters
-  useEffect(() => {
-    executeSearch(query, category);
-    if (activeFilters.genre !== category) {
-      setActiveFilters((prev) => ({ ...prev, genre: category }));
-    }
-  }, [category]);
+  // Centralized search executor with AbortController cancellation & pagination
+  const performFetch = useCallback(
+    async (
+      q: string,
+      gen: string,
+      pageNum: number,
+      isLoadMore = false
+    ) => {
+      // Cancel previous ongoing request to prevent race conditions
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
 
-  const executeSearch = async (q: string, cat: string) => {
-    try {
-      setLoading(true);
-      setError(null);
-      const term = q.trim() || (cat !== 'All' ? cat : 'popular books');
-      const res = await fetch(`${BASE_URL}/books/search/?q=${encodeURIComponent(term)}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const raw: Book[] = Array.isArray(data) ? data : [];
-      const seen = new Set<string>();
-      setRawResults(
-        raw.filter((b) => {
-          if (seen.has(b.google_book_id)) return false;
-          seen.add(b.google_book_id);
-          return true;
-        }),
-      );
-    } catch {
-      setError('Unable to fetch books. Please check your connection.');
-    } finally {
-      setLoading(false);
+      try {
+        if (isLoadMore) {
+          setLoadingMore(true);
+        } else {
+          setLoading(true);
+          setError(null);
+        }
+
+        const data = await searchBooks({
+          q: q.trim(),
+          genre: gen !== 'All' ? gen : undefined,
+          page: pageNum,
+          limit: 24, // Optimized for 4-column batches
+          signal: controller.signal,
+        });
+
+        setBooks((prev) => {
+          if (pageNum === 1) return data.results;
+          // Deduplicate incoming results
+          const seen = new Set(prev.map((b) => b.google_book_id));
+          const uniqueNew = data.results.filter((b) => !seen.has(b.google_book_id));
+          return [...prev, ...uniqueNew];
+        });
+
+        setPage(pageNum);
+        setHasMore(data.has_more);
+      } catch (err: any) {
+        if (err.name === 'AbortError') return;
+        if (!isLoadMore) {
+          setError(err.message || 'Unable to fetch books. Please check connection.');
+        }
+      } finally {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    },
+    []
+  );
+
+  // Debounced search trigger when query or category changes
+  useEffect(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    debounceTimerRef.current = setTimeout(() => {
+      performFetch(query, category, 1, false);
+    }, 350);
+
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [query, category, performFetch]);
+
+  // Handle Category Pill Selection
+  const handleSelectCategory = (cat: string) => {
+    setCategory(cat);
+    setActiveFilters((prev) => ({ ...prev, genre: cat }));
+  };
+
+  // Load more on scroll reached end
+  const handleLoadMore = () => {
+    if (!loading && !loadingMore && hasMore) {
+      performFetch(query, category, page + 1, true);
     }
   };
 
-  // Safe client-side filter and sorting logic
-  const filteredResults = useMemo(() => {
-    let list = [...rawResults];
+  // Multi-Filter Matching (Genre, Style, Novel Type, Sort)
+  const filteredAndSortedBooks = useMemo(() => {
+    let list = [...books];
 
-    // Helper to extract searchable string block from a book object
-    const getSearchableText = (book: any): string => {
-      const desc = typeof book?.description === 'string' ? book.description : '';
-      const title = typeof book?.title === 'string' ? book.title : '';
-      const cats = Array.isArray(book?.categories)
-        ? book.categories.join(' ')
-        : typeof book?.categories === 'string'
-        ? book.categories
-        : '';
-      return `${title} ${desc} ${cats}`.toLowerCase();
+    const getSearchableText = (book: Book): string => {
+      const desc = book.description || '';
+      const title = book.title || '';
+      const cats = book.categories || '';
+      const authors = book.authors || '';
+      return `${title} ${desc} ${cats} ${authors}`.toLowerCase();
     };
 
-    // 1. Filter by Genre (if selected inside modal directly)
+    // 1. Genre filter (if selected via modal or pill)
     if (activeFilters.genre !== 'All') {
       const genreTerm = activeFilters.genre.toLowerCase();
-      list = list.filter((book) => getSearchableText(book).includes(genreTerm));
+      list = list.filter((b) => getSearchableText(b).includes(genreTerm));
     }
 
-    // 2. Filter by Writing Style & Tone
+    // 2. Filter by Writing Style
     if (activeFilters.writingStyle !== 'All') {
       const styleTerm = activeFilters.writingStyle.toLowerCase();
-      list = list.filter((book) => getSearchableText(book).includes(styleTerm));
+      list = list.filter((b) => getSearchableText(b).includes(styleTerm));
     }
 
-    // 3. Filter by Novel Format & Type
+    // 3. Filter by Novel / Book Format
     if (activeFilters.novelType !== 'All') {
-      const typeTerm = activeFilters.novelType.toLowerCase();
-      list = list.filter((book) => getSearchableText(book).includes(typeTerm));
+      const typeTerm = activeFilters.novelType.toLowerCase().split('/')[0].trim();
+      list = list.filter((b) => getSearchableText(b).includes(typeTerm));
     }
 
     // 4. Sort Results
     if (activeFilters.sortBy === 'newest') {
-      list.sort((a: any, b: any) => {
+      list.sort((a, b) => {
         const dateA = new Date(a.publishedDate || 0).getTime();
         const dateB = new Date(b.publishedDate || 0).getTime();
         return dateB - dateA;
@@ -174,31 +234,25 @@ export default function ExploreScreen() {
     }
 
     return list;
-  }, [rawResults, activeFilters]);
+  }, [books, activeFilters]);
 
   const handleStatusChange = async (
     bookId: string,
     newStatus: BookStatus,
-    savedBook?: Book,
+    savedBook?: Book
   ) => {
-    setRawResults((prev) =>
+    setBooks((prev) =>
       prev.map((b) =>
         b.google_book_id === bookId
           ? { ...b, ...(savedBook ?? {}), status: newStatus }
-          : b,
-      ),
+          : b
+      )
     );
     if (selectedBook?.google_book_id === bookId) {
       setSelectedBook((prev) =>
-        prev ? { ...prev, ...(savedBook ?? {}), status: newStatus } : null,
+        prev ? { ...prev, ...(savedBook ?? {}), status: newStatus } : null
       );
     }
-  };
-
-  const formatAuthor = (authors?: string[] | string): string => {
-    if (Array.isArray(authors) && authors.length > 0) return authors[0];
-    if (typeof authors === 'string' && authors.trim()) return authors;
-    return 'Unknown';
   };
 
   const openFilterModal = () => {
@@ -221,37 +275,16 @@ export default function ExploreScreen() {
     setFilterModalVisible(false);
   };
 
-  const renderCard = ({ item }: { item: Book }) => (
-    <TouchableOpacity
-      style={styles.card}
-      activeOpacity={0.8}
-      onPress={() => {
-        setSelectedBook(item);
-        setModalVisible(true);
-      }}
-    >
-      <View style={styles.cardCoverWrapper}>
-        {item.thumbnail ? (
-          <Image source={{ uri: item.thumbnail }} style={styles.cardCover} resizeMode="cover" />
-        ) : (
-          <View style={[styles.cardCover, styles.placeholderCover]}>
-            <Ionicons name="book-outline" size={28} color="#2e2e36" />
-          </View>
-        )}
-        {item.status && (
-          <View
-            style={[
-              styles.badge,
-              { backgroundColor: STATUS_COLORS[item.status] ?? '#555' },
-            ]}
-          >
-            <Ionicons name={STATUS_ICONS[item.status] ?? 'bookmark'} size={10} color="#fff" />
-          </View>
-        )}
-      </View>
-      <Text style={styles.cardTitle} numberOfLines={2}>{item.title}</Text>
-      <Text style={styles.cardAuthor} numberOfLines={1}>{formatAuthor(item.authors)}</Text>
-    </TouchableOpacity>
+  const handleCardPress = useCallback((book: Book) => {
+    setSelectedBook(book);
+    setModalVisible(true);
+  }, []);
+
+  const renderCard = useCallback(
+    ({ item }: { item: Book }) => (
+      <BookCard item={item} onPress={handleCardPress} variant="grid4" />
+    ),
+    [handleCardPress]
   );
 
   return (
@@ -267,24 +300,20 @@ export default function ExploreScreen() {
           />
           <TextInput
             style={styles.searchInput}
-            placeholder="Title, author, subject…"
+            placeholder="Search title, author, politics, etc…"
             placeholderTextColor={MUTED}
             value={query}
             onChangeText={setQuery}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            onSubmitEditing={() => executeSearch(query, category)}
             returnKeyType="search"
           />
           {query.length > 0 && (
             <TouchableOpacity
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              onPress={() => {
-                setQuery('');
-                executeSearch('', category);
-              }}
+              onPress={() => setQuery('')}
             >
-              <Ionicons name="close-circle" size={17} color={MUTED} />
+              <Ionicons name="close-circle" size={18} color={MUTED} />
             </TouchableOpacity>
           )}
         </View>
@@ -292,7 +321,7 @@ export default function ExploreScreen() {
         {/* Filter Trigger Button */}
         <TouchableOpacity
           style={[styles.filterBtn, isFilterActive && styles.filterBtnActive]}
-          activeOpacity={0.7}
+          activeOpacity={0.75}
           onPress={openFilterModal}
         >
           <Ionicons
@@ -304,55 +333,80 @@ export default function ExploreScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Category Horizontal Scroll */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.pills}
-        style={styles.pillsRow}
-      >
-        {CATEGORIES.map((cat) => {
-          const active = category === cat;
-          return (
-            <TouchableOpacity
-              key={cat}
-              style={[styles.pill, active && styles.pillActive]}
-              onPress={() => setCategory(cat)}
-            >
-              <Text style={[styles.pillText, active && styles.pillTextActive]}>{cat}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
+      {/* Category Pills Row */}
+      <View style={styles.pillsWrapper}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.pills}
+          nestedScrollEnabled={true}
+        >
+          {CATEGORIES.map((cat) => {
+            const active = category === cat;
+            return (
+              <TouchableOpacity
+                key={cat}
+                style={[styles.pill, active && styles.pillActive]}
+                onPress={() => handleSelectCategory(cat)}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.pillText, active && styles.pillTextActive]}>
+                  {cat}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
 
       {/* Main Results Container */}
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={GOLD} />
-          <Text style={styles.stateText}>Searching…</Text>
+          <Text style={styles.stateText}>Finding great books…</Text>
         </View>
       ) : error ? (
         <View style={styles.centered}>
           <Ionicons name="alert-circle-outline" size={44} color="#ef4444" />
-          <Text style={[styles.stateText, { color: TEXT }]}>{error}</Text>
+          <Text style={[styles.stateText, { color: TEXT, marginBottom: 16 }]}>{error}</Text>
+          <TouchableOpacity
+            style={styles.retryBtn}
+            onPress={() => performFetch(query, category, 1, false)}
+          >
+            <Text style={styles.retryBtnText}>Retry</Text>
+          </TouchableOpacity>
         </View>
-      ) : filteredResults.length === 0 ? (
+      ) : filteredAndSortedBooks.length === 0 ? (
         <View style={styles.centered}>
-          <Ionicons name="search-outline" size={52} color="#1e1e25" />
-          <Text style={styles.emptyTitle}>No matching books</Text>
+          <Ionicons name="search-outline" size={54} color="#272730" />
+          <Text style={styles.emptyTitle}>No matching books found</Text>
           <Text style={styles.stateText}>
-            Try clearing filters or switching search categories.
+            Try clearing active filters or searching for different keywords.
           </Text>
+          {isFilterActive && (
+            <TouchableOpacity style={styles.clearFilterBtn} onPress={resetFilters}>
+              <Text style={styles.clearFilterBtnText}>Clear Filters</Text>
+            </TouchableOpacity>
+          )}
         </View>
       ) : (
         <FlatList
-          data={filteredResults}
+          data={filteredAndSortedBooks}
           keyExtractor={(item) => item.google_book_id}
           renderItem={renderCard}
-          numColumns={2}
+          numColumns={4}
           columnWrapperStyle={styles.columnWrapper}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.4}
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={styles.footerLoading}>
+                <ActivityIndicator size="small" color={GOLD} />
+              </View>
+            ) : null
+          }
         />
       )}
 
@@ -371,21 +425,23 @@ export default function ExploreScreen() {
         transparent
         onRequestClose={() => setFilterModalVisible(false)}
       >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => setFilterModalVisible(false)}
-        >
-          <Pressable style={styles.modalContent} onPress={(e) => e.stopPropagation()}>
+        <View style={styles.modalBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setFilterModalVisible(false)} />
+          <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Refine Results</Text>
+              <Text style={styles.modalTitle}>Refine Books</Text>
               <TouchableOpacity onPress={() => setFilterModalVisible(false)}>
                 <Ionicons name="close" size={22} color={MUTED} />
               </TouchableOpacity>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false} style={styles.modalScroll}>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              style={styles.modalScroll}
+              nestedScrollEnabled={true}
+            >
               {/* Sort Options */}
-              <Text style={styles.filterSectionTitle}>Sort By</Text>
+              <Text style={styles.filterSectionTitle}>Sort Order</Text>
               <View style={styles.chipRow}>
                 {(['relevance', 'newest'] as SortOption[]).map((sort) => {
                   const active = tempFilters.sortBy === sort;
@@ -403,81 +459,74 @@ export default function ExploreScreen() {
                 })}
               </View>
 
-              {/* Genre / Category Selector */}
+              {/* Genre / Category */}
               <Text style={styles.filterSectionTitle}>Genre & Subject</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalChipScroll}>
-                <View style={styles.chipRow}>
-                  {CATEGORIES.map((cat) => {
-                    const active = tempFilters.genre === cat;
-                    return (
-                      <TouchableOpacity
-                        key={cat}
-                        style={[styles.chip, active && styles.chipActive]}
-                        onPress={() => setTempFilters({ ...tempFilters, genre: cat })}
-                      >
-                        <Text style={[styles.chipText, active && styles.chipTextActive]}>{cat}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </ScrollView>
+              <View style={styles.chipWrapRow}>
+                {CATEGORIES.map((cat) => {
+                  const active = tempFilters.genre === cat;
+                  return (
+                    <TouchableOpacity
+                      key={cat}
+                      style={[styles.chip, active && styles.chipActive]}
+                      onPress={() => setTempFilters({ ...tempFilters, genre: cat })}
+                    >
+                      <Text style={[styles.chipText, active && styles.chipTextActive]}>{cat}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
 
-              {/* Format / Type */}
-              <Text style={styles.filterSectionTitle}>Novel Format & Type</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalChipScroll}>
-                <View style={styles.chipRow}>
-                  {NOVEL_TYPES.map((type) => {
-                    const active = tempFilters.novelType === type;
-                    return (
-                      <TouchableOpacity
-                        key={type}
-                        style={[styles.chip, active && styles.chipActive]}
-                        onPress={() => setTempFilters({ ...tempFilters, novelType: type })}
-                      >
-                        <Text style={[styles.chipText, active && styles.chipTextActive]}>{type}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </ScrollView>
+              {/* Novel / Book Format */}
+              <Text style={styles.filterSectionTitle}>Novel & Book Format</Text>
+              <View style={styles.chipWrapRow}>
+                {NOVEL_TYPES.map((type) => {
+                  const active = tempFilters.novelType === type;
+                  return (
+                    <TouchableOpacity
+                      key={type}
+                      style={[styles.chip, active && styles.chipActive]}
+                      onPress={() => setTempFilters({ ...tempFilters, novelType: type })}
+                    >
+                      <Text style={[styles.chipText, active && styles.chipTextActive]}>{type}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
 
               {/* Writing Style */}
               <Text style={styles.filterSectionTitle}>Writing Style & Tone</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalChipScroll}>
-                <View style={styles.chipRow}>
-                  {WRITING_STYLES.map((style) => {
-                    const active = tempFilters.writingStyle === style;
-                    return (
-                      <TouchableOpacity
-                        key={style}
-                        style={[styles.chip, active && styles.chipActive]}
-                        onPress={() => setTempFilters({ ...tempFilters, writingStyle: style })}
-                      >
-                        <Text style={[styles.chipText, active && styles.chipTextActive]}>{style}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </ScrollView>
+              <View style={styles.chipWrapRow}>
+                {WRITING_STYLES.map((style) => {
+                  const active = tempFilters.writingStyle === style;
+                  return (
+                    <TouchableOpacity
+                      key={style}
+                      style={[styles.chip, active && styles.chipActive]}
+                      onPress={() => setTempFilters({ ...tempFilters, writingStyle: style })}
+                    >
+                      <Text style={[styles.chipText, active && styles.chipTextActive]}>{style}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
             </ScrollView>
 
             {/* Filter Actions */}
             <View style={styles.modalActions}>
               <TouchableOpacity style={styles.resetBtn} onPress={resetFilters}>
-                <Text style={styles.resetBtnText}>Reset</Text>
+                <Text style={styles.resetBtnText}>Reset All</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.applyBtn} onPress={applyFilters}>
                 <Text style={styles.applyBtnText}>Apply Filters</Text>
               </TouchableOpacity>
             </View>
-          </Pressable>
-        </Pressable>
+          </View>
+        </View>
       </Modal>
     </View>
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: BG, paddingTop: 14 },
 
@@ -485,7 +534,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginHorizontal: 16,
-    marginBottom: 14,
+    marginBottom: 12,
     gap: 10,
   },
   searchBar: {
@@ -501,9 +550,9 @@ const styles = StyleSheet.create({
     borderColor: BORDER,
   },
   searchBarFocused: {
-    borderColor: `${GOLD}66`,
+    borderColor: GOLD,
   },
-  searchInput: { flex: 1, color: TEXT, fontSize: 15 },
+  searchInput: { flex: 1, color: TEXT, fontSize: 14 },
   filterBtn: {
     width: 46,
     height: 46,
@@ -521,17 +570,15 @@ const styles = StyleSheet.create({
   },
   activeDot: {
     position: 'absolute',
-    top: 9,
-    right: 9,
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    top: 8,
+    right: 8,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
     backgroundColor: '#ef4444',
   },
 
-  pillsRow: {
-    flexGrow: 0,
-    flexShrink: 0,
+  pillsWrapper: {
     marginBottom: 14,
   },
   pills: {
@@ -540,92 +587,82 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   pill: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 15,
-    paddingVertical: 7,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
     borderRadius: 20,
     backgroundColor: SURFACE,
     borderWidth: 1,
     borderColor: BORDER,
   },
   pillActive: {
-    backgroundColor: `${GOLD}1a`,
-    borderColor: `${GOLD}70`,
+    backgroundColor: `${GOLD}20`,
+    borderColor: GOLD,
   },
-  pillText: { fontSize: 13, fontWeight: '500', color: MUTED },
-  pillTextActive: { color: GOLD, fontWeight: '600' },
-
-  card: {
-    width: '48%',
-    backgroundColor: SURFACE,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  cardCoverWrapper: {
-    position: 'relative',
-    width: '100%',
-    height: 190,
-    borderTopLeftRadius: 14,
-    borderTopRightRadius: 14,
-    overflow: 'hidden',
-  },
-  cardCover: { width: '100%', height: '100%' },
-  placeholderCover: {
-    backgroundColor: '#1a1a1f',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  badge: {
-    position: 'absolute',
-    top: 7,
-    right: 7,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cardTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: TEXT,
-    marginTop: 9,
-    marginHorizontal: 10,
-    marginBottom: 3,
-    lineHeight: 18,
-  },
-  cardAuthor: { fontSize: 12, color: MUTED, marginHorizontal: 10, marginBottom: 10 },
+  pillText: { fontSize: 12, fontWeight: '500', color: MUTED },
+  pillTextActive: { color: GOLD, fontWeight: '700' },
 
   centered: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingBottom: 60,
+    padding: 24,
+    paddingBottom: 110,
   },
   stateText: { color: MUTED, marginTop: 10, textAlign: 'center', fontSize: 13 },
   emptyTitle: {
     fontSize: 17,
-    fontWeight: '600',
+    fontWeight: '700',
     color: TEXT,
     marginTop: 14,
     marginBottom: 4,
   },
+  clearFilterBtn: {
+    marginTop: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: SURFACE_LIGHT,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  clearFilterBtnText: {
+    color: GOLD,
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  retryBtn: {
+    paddingHorizontal: 24,
+    paddingVertical: 11,
+    backgroundColor: GOLD,
+    borderRadius: 10,
+  },
+  retryBtnText: { color: BG, fontWeight: '700', fontSize: 14 },
 
-  listContent: { paddingHorizontal: 16, paddingBottom: 24 },
-  columnWrapper: { justifyContent: 'space-between', marginBottom: 14 },
+  listContent: {
+    paddingHorizontal: 12,
+    paddingBottom: 110,
+  },
+  columnWrapper: {
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  footerLoading: {
+    paddingVertical: 20,
+    alignItems: 'center',
+  },
 
+  // Filter Modal
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.65)',
+    backgroundColor: 'rgba(0,0,0,0.75)',
     justifyContent: 'flex-end',
   },
   modalContent: {
     backgroundColor: SURFACE,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
     padding: 20,
-    maxHeight: '80%',
+    maxHeight: '82%',
     borderWidth: 1,
     borderColor: BORDER,
   },
@@ -635,41 +672,42 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  modalTitle: { fontSize: 17, fontWeight: '700', color: TEXT },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: TEXT },
   modalScroll: {
     marginVertical: 4,
   },
   filterSectionTitle: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 11,
+    fontWeight: '700',
     color: MUTED,
     marginTop: 14,
     marginBottom: 8,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 0.6,
   },
   chipRow: {
     flexDirection: 'row',
     gap: 8,
   },
-  horizontalChipScroll: {
-    flexGrow: 0,
-    marginBottom: 4,
+  chipWrapRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
   },
   chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderRadius: 10,
-    backgroundColor: BG,
+    backgroundColor: SURFACE_LIGHT,
     borderWidth: 1,
     borderColor: BORDER,
   },
   chipActive: {
     borderColor: GOLD,
-    backgroundColor: `${GOLD}1a`,
+    backgroundColor: `${GOLD}22`,
   },
-  chipText: { fontSize: 13, color: MUTED, fontWeight: '500' },
-  chipTextActive: { color: GOLD, fontWeight: '600' },
+  chipText: { fontSize: 12, color: MUTED, fontWeight: '500' },
+  chipTextActive: { color: GOLD, fontWeight: '700' },
   modalActions: {
     flexDirection: 'row',
     gap: 12,
@@ -684,7 +722,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: BORDER,
-    backgroundColor: BG,
+    backgroundColor: SURFACE_LIGHT,
   },
   resetBtnText: { color: TEXT, fontWeight: '600', fontSize: 14 },
   applyBtn: {

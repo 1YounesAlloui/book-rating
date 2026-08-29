@@ -3,21 +3,21 @@ import {
   Modal,
   View,
   Text,
-  Image,
   TouchableOpacity,
   StyleSheet,
   ScrollView,
   ActivityIndicator,
-  Platform,
+  Pressable,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { saveBookToShelf, updateShelfStatus } from '../services/api';
 
 export type BookStatus = 'TO_READ' | 'FINISHED' | 'FAVORITE' | null;
 
-// Covers both search results (from Google Books) and shelved books (from UserBookSerializer)
 export interface Book {
   id?: number;                 // UserBook Django PK — only present on shelved books
-  google_book_id: string;      // Always present — Google's string ID
+  google_book_id: string;      // Always present — Google/OL/Gutendex/OpenBD ID
   title: string;
   authors?: string;
   description?: string;
@@ -26,19 +26,23 @@ export interface Book {
   status?: BookStatus;
   rating?: number;
   updated_at?: string;
+  publishedDate?: string;
 }
 
 interface BookDetailModalProps {
   visible: boolean;
   book: Book | null;
   onClose: () => void;
-  onStatusChange: (googleBookId: string, newStatus: BookStatus, savedBook?: Book) => Promise<void>;
+  onStatusChange: (googleBookId: string, newStatus: BookStatus, savedBook?: Book) => Promise<void> | void;
 }
 
-const BASE_URL =
-  Platform.OS === 'android'
-    ? 'http://10.0.2.2:8000/api'
-    : 'http://localhost:8000/api';
+const GOLD = '#c8a96e';
+const BG = '#0d0d10';
+const SURFACE = '#131317';
+const SURFACE_LIGHT = '#1a1a22';
+const BORDER = 'rgba(255, 255, 255, 0.08)';
+const TEXT = '#f0ede8';
+const MUTED = '#8e8e9f';
 
 export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   visible,
@@ -49,9 +53,6 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
   const [currentStatus, setCurrentStatus] = useState<BookStatus>(null);
   const [loadingStatus, setLoadingStatus] = useState<BookStatus>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  // Track the Django id once the book has been saved for the first time
-  // (so subsequent taps in the same modal session don't try to re-save)
   const [savedBookId, setSavedBookId] = useState<number | undefined>(undefined);
 
   useEffect(() => {
@@ -74,59 +75,26 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 
     try {
       if (!savedBookId) {
-        // Book is from search/home — not in DB yet.
-
         if (nextStatus === null) {
-          // Toggling off an unsaved book — nothing to persist, just clear UI state
+          await onStatusChange(book.google_book_id, null);
           return;
         }
 
-        // Save to DB for the first time
-        await saveNewBook(book, nextStatus);
+        // Save new book to backend
+        const saved = await saveBookToShelf(book, nextStatus);
+        setSavedBookId(saved.id);
+        await onStatusChange(book.google_book_id, nextStatus, saved);
       } else {
-        // Book is already shelved — just update its status (null = remove from shelf)
+        // Update existing book
+        await updateShelfStatus(book.google_book_id, nextStatus);
         await onStatusChange(book.google_book_id, nextStatus);
       }
     } catch (err: any) {
-      // Roll back on failure
       setCurrentStatus(previousStatus);
-      setErrorMsg('Failed to update shelf. Try again.');
-      console.error('handlePressStatus error:', err.message);
+      setErrorMsg(err.message || 'Failed to update shelf. Please try again.');
     } finally {
       setLoadingStatus(null);
     }
-  };
-
-  const saveNewBook = async (b: Book, newStatus: BookStatus) => {
-    const response = await fetch(`${BASE_URL}/books/save/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        google_book_id: b.google_book_id,
-        title: b.title,
-        authors: b.authors ?? '',
-        description: b.description ?? '',
-        thumbnail: b.thumbnail ?? '',
-        categories: b.categories ?? '',
-        status: newStatus,
-        rating: b.rating ?? 0,
-      }),
-    });
-
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      console.error('Save error body:', body);
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const saved: Book = await response.json();
-    console.log('[SAVE] Book saved to shelf:', saved);
-
-    // Cache the Django id locally so subsequent taps use PATCH instead of POST
-    setSavedBookId(saved.id);
-
-    // Notify parent with the full saved object so it can update its list state
-    await onStatusChange(saved.google_book_id, newStatus, saved);
   };
 
   const formatAuthors = (authors?: string): string => {
@@ -140,26 +108,30 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
       label: 'To Read',
       icon: 'bookmark' as const,
       color: '#3b82f6',
-      activeStyle: styles.statusButtonActiveToRead,
-      activeTextStyle: styles.statusTextActiveToRead,
+      activeBg: 'rgba(59, 130, 246, 0.16)',
+      activeBorder: '#3b82f6',
     },
     {
       key: 'FINISHED' as const,
       label: 'Finished',
       icon: 'checkmark-circle' as const,
       color: '#10b981',
-      activeStyle: styles.statusButtonActiveFinished,
-      activeTextStyle: styles.statusTextActiveFinished,
+      activeBg: 'rgba(16, 185, 129, 0.16)',
+      activeBorder: '#10b981',
     },
     {
       key: 'FAVORITE' as const,
       label: 'Favorite',
       icon: 'heart' as const,
       color: '#ef4444',
-      activeStyle: styles.statusButtonActiveFavorite,
-      activeTextStyle: styles.statusTextActiveFavorite,
+      activeBg: 'rgba(239, 68, 68, 0.16)',
+      activeBorder: '#ef4444',
     },
   ] as const;
+
+  const categories = book.categories
+    ? book.categories.split(',').map((c) => c.trim()).filter(Boolean).slice(0, 3)
+    : [];
 
   return (
     <Modal
@@ -169,56 +141,81 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
       onRequestClose={onClose}
     >
       <View style={styles.overlay}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <View style={styles.modalContainer}>
           {/* Header */}
           <View style={styles.header}>
-            <Text style={styles.headerTitle} numberOfLines={1}>
-              Book Details
-            </Text>
-            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-              <Ionicons name="close" size={22} color="#94a3b8" />
+            <View style={styles.headerIndicator} />
+            <TouchableOpacity onPress={onClose} style={styles.closeButton} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Ionicons name="close" size={22} color={MUTED} />
             </TouchableOpacity>
           </View>
 
           <ScrollView
             contentContainerStyle={styles.scrollContent}
             showsVerticalScrollIndicator={false}
+            nestedScrollEnabled={true}
           >
-            {/* Cover */}
-            <View style={styles.coverWrapper}>
-              {book.thumbnail ? (
-                <Image
-                  source={{ uri: book.thumbnail }}
-                  style={styles.coverImage}
-                  resizeMode="cover"
-                />
-              ) : (
-                <View style={[styles.coverImage, styles.placeholderCover]}>
-                  <Ionicons name="book-outline" size={48} color="#475569" />
+            {/* Book Presentation Section */}
+            <View style={styles.topSection}>
+              <View style={styles.coverWrapper}>
+                {book.thumbnail ? (
+                  <Image
+                    source={{ uri: book.thumbnail }}
+                    style={styles.coverImage}
+                    contentFit="cover"
+                    transition={200}
+                    cachePolicy="memory-disk"
+                  />
+                ) : (
+                  <View style={[styles.coverImage, styles.placeholderCover]}>
+                    <Ionicons name="book-outline" size={48} color="#333340" />
+                  </View>
+                )}
+              </View>
+
+              <Text style={styles.title}>{book.title}</Text>
+              <Text style={styles.author}>{formatAuthors(book.authors)}</Text>
+
+              {/* Category Pills */}
+              {categories.length > 0 && (
+                <View style={styles.categoryRow}>
+                  {categories.map((cat, i) => (
+                    <View key={i} style={styles.categoryPill}>
+                      <Text style={styles.categoryPillText}>{cat}</Text>
+                    </View>
+                  ))}
                 </View>
               )}
             </View>
 
-            {/* Info */}
-            <Text style={styles.title}>{book.title}</Text>
-            <Text style={styles.author}>{formatAuthors(book.authors)}</Text>
-
             {/* Error message */}
             {errorMsg && (
-              <Text style={styles.errorText}>{errorMsg}</Text>
+              <View style={styles.errorBox}>
+                <Ionicons name="alert-circle" size={16} color="#ef4444" />
+                <Text style={styles.errorText}>{errorMsg}</Text>
+              </View>
             )}
 
-            {/* Shelf Buttons */}
+            {/* Shelf Actions */}
+            <Text style={styles.sectionHeading}>Shelf Status</Text>
             <View style={styles.actionContainer}>
-              {SHELF_BUTTONS.map(({ key, label, icon, color, activeStyle, activeTextStyle }) => {
+              {SHELF_BUTTONS.map(({ key, label, icon, color, activeBg, activeBorder }) => {
                 const isActive = currentStatus === key;
                 const isLoading = loadingStatus === key;
                 return (
                   <TouchableOpacity
                     key={key}
-                    style={[styles.statusButton, isActive && activeStyle]}
+                    style={[
+                      styles.statusButton,
+                      isActive && {
+                        backgroundColor: activeBg,
+                        borderColor: activeBorder,
+                      },
+                    ]}
                     onPress={() => handlePressStatus(key)}
                     disabled={loadingStatus !== null}
+                    activeOpacity={0.7}
                   >
                     {isLoading ? (
                       <ActivityIndicator size="small" color={color} />
@@ -227,9 +224,14 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
                         <Ionicons
                           name={isActive ? icon : (`${icon}-outline` as any)}
                           size={18}
-                          color={isActive ? color : '#94a3b8'}
+                          color={isActive ? color : MUTED}
                         />
-                        <Text style={[styles.statusText, isActive && activeTextStyle]}>
+                        <Text
+                          style={[
+                            styles.statusText,
+                            isActive && { color, fontWeight: '700' },
+                          ]}
+                        >
                           {label}
                         </Text>
                       </>
@@ -241,11 +243,13 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 
             {/* Description */}
             <View style={styles.descriptionSection}>
-              <Text style={styles.sectionHeading}>Description</Text>
+              <Text style={styles.sectionHeading}>About this book</Text>
               <Text style={styles.descriptionText}>
-                {book.description?.trim() || 'No description available for this book.'}
+                {book.description?.trim() || 'No detailed synopsis available for this volume.'}
               </Text>
             </View>
+
+            <View style={{ height: 28 }} />
           </ScrollView>
         </View>
       </View>
@@ -256,80 +260,130 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
     justifyContent: 'flex-end',
   },
   modalContainer: {
-    backgroundColor: '#121215',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    backgroundColor: SURFACE,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: BORDER,
     maxHeight: '90%',
-    paddingBottom: 24,
   },
   header: {
-    flexDirection: 'row',
+    position: 'relative',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.08)',
+    justifyContent: 'center',
+    paddingTop: 12,
+    paddingBottom: 8,
   },
-  headerTitle: {
-    color: '#f8fafc',
-    fontSize: 16,
-    fontWeight: '600',
+  headerIndicator: {
+    width: 38,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
   },
-  closeButton: { padding: 4 },
+  closeButton: {
+    position: 'absolute',
+    right: 18,
+    top: 10,
+    padding: 6,
+    borderRadius: 20,
+    backgroundColor: SURFACE_LIGHT,
+  },
   scrollContent: {
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 24,
+  },
+  topSection: {
     alignItems: 'center',
+    marginBottom: 20,
   },
   coverWrapper: {
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.5,
-    shadowRadius: 12,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.6,
+    shadowRadius: 16,
+    elevation: 10,
     marginBottom: 16,
   },
   coverImage: {
-    width: 130,
-    height: 190,
-    borderRadius: 12,
+    width: 140,
+    height: 204,
+    borderRadius: 14,
+    backgroundColor: SURFACE_LIGHT,
   },
   placeholderCover: {
-    backgroundColor: '#1a1a1e',
     justifyContent: 'center',
     alignItems: 'center',
   },
   title: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#f8fafc',
+    color: TEXT,
     textAlign: 'center',
     marginBottom: 6,
+    lineHeight: 26,
   },
   author: {
     fontSize: 14,
-    color: '#94a3b8',
+    color: GOLD,
+    fontWeight: '600',
     textAlign: 'center',
-    marginBottom: 20,
+    marginBottom: 10,
+  },
+  categoryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 4,
+  },
+  categoryPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: SURFACE_LIGHT,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  categoryPillText: {
+    fontSize: 11,
+    color: MUTED,
+    fontWeight: '500',
+  },
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 16,
   },
   errorText: {
     color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '500',
+    flex: 1,
+  },
+  sectionHeading: {
     fontSize: 13,
-    marginBottom: 12,
-    textAlign: 'center',
+    fontWeight: '700',
+    color: MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
   },
   actionContainer: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginBottom: 24,
     width: '100%',
-    justifyContent: 'center',
   },
   statusButton: {
     flex: 1,
@@ -337,46 +391,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    backgroundColor: '#1a1a1e',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: SURFACE_LIGHT,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  statusButtonActiveToRead: {
-    backgroundColor: 'rgba(59, 130, 246, 0.15)',
-    borderColor: '#3b82f6',
-  },
-  statusButtonActiveFinished: {
-    backgroundColor: 'rgba(16, 185, 129, 0.15)',
-    borderColor: '#10b981',
-  },
-  statusButtonActiveFavorite: {
-    backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    borderColor: '#ef4444',
+    borderColor: BORDER,
   },
   statusText: {
-    color: '#94a3b8',
+    color: MUTED,
     fontSize: 12,
     fontWeight: '600',
   },
-  statusTextActiveToRead: { color: '#3b82f6' },
-  statusTextActiveFinished: { color: '#10b981' },
-  statusTextActiveFavorite: { color: '#ef4444' },
   descriptionSection: {
     width: '100%',
-    marginTop: 8,
-  },
-  sectionHeading: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#f8fafc',
-    marginBottom: 8,
   },
   descriptionText: {
     fontSize: 14,
-    color: '#94a3b8',
-    lineHeight: 20,
+    color: '#c4c4d0',
+    lineHeight: 22,
   },
 });

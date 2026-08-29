@@ -1,23 +1,119 @@
-# 1. Security (CRITICAL)
+# ====================================================================
+# 1. Environment & Sensitive Credentials (CRITICAL - DO NOT COMMIT)
+# ====================================================================
 .env
-*.pot
-*.py[co]
+.env.*
+*.env
+backend/bookrating/.env
+*.pem
+*.key
+*.jks
+*.keystore
+*.p8
+*.p12
+*.mobileprovision
+credentials*.json
+google-services.json
+GoogleService-Info.plist
 
-# 2. Python / Django Cache
+# ====================================================================
+# 2. Python & Django
+# ====================================================================
 __pycache__/
-db.sqlite3
-*.log
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
 
-# 3. Virtual Environments
+# Local databases & logs
+*.sqlite3
+db.sqlite3
+*.db
+*.log
+django.log
+
+# ====================================================================
+# 3. Python Virtual Environments
+# ====================================================================
 venv/
+.venv/
 env/
 ENV/
-.venv/
+env.bak/
+venv.bak/
 
-# 4. OS Generated Files
-.DS_Store
-Thumbs.db
+# ====================================================================
+# 4. Node.js & React Native / Expo
+# ====================================================================
+node_modules/
+frontend/node_modules/
+.expo/
+frontend/.expo/
+.expo-shared/
+frontend/.expo-shared/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+*.tsbuildinfo
+npm-debug.*
+yarn-debug.*
+yarn-error.*
 
-# 5. Static & Media (Collected files)
+# Native generated builds (Expo prebuild)
+/ios
+/android
+frontend/ios
+frontend/android
+
+# Build outputs
+*.apk
+*.aab
+*.ipa
+
+# ====================================================================
+# 5. Static & Media Files
+# ====================================================================
 staticfiles/
 media/
+
+# ====================================================================
+# 6. IDE, AI Assistants & Operating System
+# ====================================================================
+.vscode/
+.idea/
+.claude/
+.gemini/
+.agents/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini

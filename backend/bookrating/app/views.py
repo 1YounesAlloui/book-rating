@@ -1,5 +1,8 @@
 import os
+import time
+import random
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -7,42 +10,70 @@ from rest_framework import status
 from .models import Book, UserBook
 from .serializers import UserBookSerializer
 
-GOOGLE_BOOKS_API_KEY = os.getenv("GOOGLE_BOOKS_API_KEY")
+GOOGLE_BOOKS_API_KEY = os.getenv("GOOGLE_BOOKS_API_KEY", "")
 HEADERS = {'User-Agent': 'BookDiscoveryApp/1.0 (contact@example.com)'}
 
+# ─── Simple In-Memory TTL Cache for Fast Book Loading ───────────────
+_CACHE = {}
+_CACHE_TTL = 900  # 15 minutes
 
-# ─── API Fetchers ──────────────────────────────────────────────────
+def get_from_cache(key: str):
+    if key in _CACHE:
+        val, timestamp = _CACHE[key]
+        if time.time() - timestamp < _CACHE_TTL:
+            return val
+        else:
+            del _CACHE[key]
+    return None
 
-def fetch_google_books(query, max_results=10):
+def set_in_cache(key: str, val):
+    if len(_CACHE) > 500:
+        oldest_key = min(_CACHE.keys(), key=lambda k: _CACHE[k][1])
+        _CACHE.pop(oldest_key, None)
+    _CACHE[key] = (val, time.time())
+
+
+# ─── API Fetchers with Timeout & Safety ──────────────────────────────
+
+def fetch_google_books(query, max_results=20, start_index=0):
     url = (
         f"https://www.googleapis.com/books/v1/volumes"
-        f"?q={query}&maxResults={max_results}&key={GOOGLE_BOOKS_API_KEY}"
+        f"?q={query}&startIndex={start_index}&maxResults={max_results}"
     )
+    if GOOGLE_BOOKS_API_KEY:
+        url += f"&key={GOOGLE_BOOKS_API_KEY}"
+
     try:
-        res = requests.get(url, headers=HEADERS, timeout=5)
+        res = requests.get(url, headers=HEADERS, timeout=4)
         if res.status_code != 200:
             return []
         items = res.json().get('items', [])
         books = []
         for item in items:
             info = item.get('volumeInfo', {})
+            img_links = info.get('imageLinks', {})
+            thumb = img_links.get('thumbnail') or img_links.get('smallThumbnail') or ''
+            if thumb.startswith('http://'):
+                thumb = 'https://' + thumb[7:]
+
             books.append({
                 'google_book_id': item.get('id', ''),
                 'title': info.get('title', 'Unknown Title'),
                 'authors': ", ".join(info.get('authors', ['Unknown Author'])),
                 'description': info.get('description', ''),
-                'thumbnail': info.get('imageLinks', {}).get('thumbnail', ''),
+                'thumbnail': thumb,
                 'categories': ", ".join(info.get('categories', ['General'])),
+                'publishedDate': info.get('publishedDate', ''),
             })
         return books
     except Exception:
         return []
 
 
-def fetch_open_library_books(query, limit=10):
-    url = f"https://openlibrary.org/search.json?q={query}&limit={limit}"
+def fetch_open_library_books(query, limit=10, page=1):
+    url = f"https://openlibrary.org/search.json?q={query}&limit={limit}&page={page}"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=5)
+        res = requests.get(url, headers=HEADERS, timeout=4)
         if res.status_code != 200:
             return []
         docs = res.json().get('docs', [])
@@ -53,7 +84,7 @@ def fetch_open_library_books(query, limit=10):
             cover_url = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg" if cover_id else ''
 
             subjects = item.get('subject', [])
-            categories_str = ", ".join(subjects[:2]) if isinstance(subjects, list) and subjects else 'General'
+            categories_str = ", ".join(subjects[:3]) if isinstance(subjects, list) and subjects else 'General'
 
             first_sentence = item.get('first_sentence')
             desc = first_sentence[0] if isinstance(first_sentence, list) and first_sentence else ''
@@ -65,33 +96,30 @@ def fetch_open_library_books(query, limit=10):
                 'description': desc,
                 'thumbnail': cover_url,
                 'categories': categories_str,
+                'publishedDate': str(item.get('first_publish_year', '')),
             })
         return books
     except Exception:
         return []
 
 
-def fetch_gutendex_books(query):
+def fetch_gutendex_books(query, page=1):
     """Fetches free classic eBooks from Project Gutenberg via Gutendex API."""
-    url = f"https://gutendex.com/books/?search={query}"
+    url = f"https://gutendex.com/books/?search={query}&page={page}"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=5)
+        res = requests.get(url, headers=HEADERS, timeout=4)
         if res.status_code != 200:
             return []
         results = res.json().get('results', [])
         books = []
         for item in results:
             gutenberg_id = item.get('id')
-            
-            # Format authors safely (gutendex returns author objects)
             authors_list = [a.get('name', '') for a in item.get('authors', []) if a.get('name')]
             authors_str = ", ".join(authors_list) if authors_list else 'Unknown Author'
             
-            # Get primary category/subject
             subjects = item.get('subjects', [])
             categories_str = subjects[0].split(' -- ')[0] if subjects else 'Classic Literature'
             
-            # Formulate Project Gutenberg cover image URL
             formats = item.get('formats', {})
             thumbnail = formats.get('image/jpeg', f"https://www.gutenberg.org/cache/epub/{gutenberg_id}/pg{gutenberg_id}.cover.medium.jpg")
 
@@ -102,6 +130,7 @@ def fetch_gutendex_books(query):
                 'description': f"Public Domain Classic with {item.get('download_count', 0)} downloads on Project Gutenberg.",
                 'thumbnail': thumbnail,
                 'categories': categories_str,
+                'publishedDate': '',
             })
         return books
     except Exception:
@@ -113,7 +142,7 @@ def fetch_openbd_books(isbn):
     clean_isbn = isbn.replace('-', '').strip()
     url = f"https://api.openbd.jp/v1/get?isbn={clean_isbn}"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=5)
+        res = requests.get(url, headers=HEADERS, timeout=3)
         if res.status_code != 200:
             return []
         data = res.json()
@@ -128,45 +157,110 @@ def fetch_openbd_books(isbn):
             'description': summary.get('volume', ''),
             'thumbnail': summary.get('cover', ''),
             'categories': 'General',
+            'publishedDate': summary.get('pubdate', ''),
         }]
     except Exception:
         return []
 
 
-def search_all_sources(query, max_results=20):
+def search_all_sources(query, max_results=20, page=1, start_index=0, exclude_ids=None):
     """
-    Fetches books from Google, OpenLibrary, Gutendex, and OpenBD (if search query is an ISBN),
+    Fetches books from Google, OpenLibrary, Gutendex, and OpenBD concurrently in parallel,
     merging and deduplicating results.
     """
-    results = []
+    if exclude_ids is None:
+        exclude_ids = set()
 
-    # If query looks like an ISBN, try OpenBD first
+    cache_key = f"search:{query.lower().strip()}:p{page}:s{start_index}:l{max_results}"
+    cached = get_from_cache(cache_key)
+    if cached is not None:
+        return [b for b in cached if b.get('google_book_id') not in exclude_ids]
+
     clean_query = query.replace('-', '').strip()
-    if clean_query.isdigit() and len(clean_query) in (10, 13):
-        results.extend(fetch_openbd_books(clean_query))
+    is_isbn = clean_query.isdigit() and len(clean_query) in (10, 13)
 
-    # Fetch from providers
-    google_books = fetch_google_books(query, max_results=max_results)
-    open_lib_books = fetch_open_library_books(query, limit=10)
-    gutendex_books = fetch_gutendex_books(query)
+    results = []
+    google_start = start_index if start_index > 0 else (page - 1) * max_results
 
-    results.extend(google_books)
-    results.extend(open_lib_books)
-    results.extend(gutendex_books)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch_google_books, query, max_results=max_results, start_index=google_start): 'google',
+            executor.submit(fetch_open_library_books, query, limit=10, page=page): 'open_library',
+            executor.submit(fetch_gutendex_books, query, page=page): 'gutendex',
+        }
+        if is_isbn:
+            futures[executor.submit(fetch_openbd_books, clean_query)] = 'openbd'
 
-    # Deduplicate results based on lowercased title and primary author
+        for future in as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    results.extend(res)
+            except Exception:
+                pass
+
+    # Deduplicate results
     seen = set()
     deduped_books = []
     for book in results:
-        title_key = book['title'].strip().lower()
-        author_key = book['authors'].split(',')[0].strip().lower() if book['authors'] else ''
+        b_id = book.get('google_book_id', '')
+        if b_id in exclude_ids:
+            continue
+
+        title_key = book.get('title', '').strip().lower()
+        author_key = book.get('authors', '').split(',')[0].strip().lower() if book.get('authors') else ''
         dedupe_key = f"{title_key}|{author_key}"
 
-        if dedupe_key not in seen:
+        if dedupe_key not in seen and b_id not in seen:
             seen.add(dedupe_key)
+            if b_id:
+                seen.add(b_id)
             deduped_books.append(book)
 
-    return deduped_books[:max_results]
+    final_books = deduped_books[:max_results]
+    set_in_cache(cache_key, final_books)
+    return final_books
+
+
+# ─── Home Feed Topic Pools ─────────────────────────────────────────
+
+TRENDING_SEEDS = [
+    'subject:bestsellers',
+    'subject:fiction',
+    'subject:politics',
+    'subject:geopolitics',
+    'subject:history',
+    'subject:award winning books',
+    'subject:popular science',
+    'subject:philosophy',
+]
+
+RECOMMENDED_SEEDS = [
+    'subject:classic literature',
+    'subject:geography',
+    'subject:world politics',
+    'subject:psychology',
+    'subject:technology',
+    'subject:international relations',
+    'subject:critical thinking',
+    'subject:biography',
+]
+
+ALL_GENRES = [
+    'Politics',
+    'Geopolitics',
+    'Geography',
+    'Fiction',
+    'Technology',
+    'Science',
+    'History',
+    'Philosophy',
+    'Psychology',
+    'Business',
+    'Biography',
+    'Mystery',
+    'Fantasy',
+]
 
 
 # ─── Django Views ──────────────────────────────────────────────────
@@ -174,25 +268,150 @@ def search_all_sources(query, max_results=20):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_home_feed(request):
-    """Fetches trending books and curated genres for the Home Tab."""
-    genres = [
-        'Fiction', 'Technology', 'Science', 'History',
-        'Fantasy', 'Philosophy', 'Psychology', 'Business',
-        'Biography', 'Mystery',
-    ]
+    """
+    Fetches trending books and curated genres for the Home Tab in parallel.
+    Supports ?refresh=true or random parameter to provide randomized fresh books
+    with zero duplicates.
+    """
+    force_refresh = request.GET.get('refresh', '').lower() in ('true', '1')
+    random_seed = request.GET.get('seed', '')
+
+    cache_key = "home_feed_static" if not (force_refresh or random_seed) else None
+    if cache_key:
+        cached_feed = get_from_cache(cache_key)
+        if cached_feed:
+            return Response(cached_feed, status=status.HTTP_200_OK)
+
+    # Random offset to vary Google Books results on refresh
+    random_offset = random.choice([0, 4, 8, 12, 16]) if force_refresh else 0
+
+    # Pick randomized trending and recommended seed queries
+    trending_query = random.choice(TRENDING_SEEDS) if force_refresh else 'subject:bestsellers'
+    recommended_query = random.choice(RECOMMENDED_SEEDS) if force_refresh else 'subject:award winning books'
+
+    # Shuffle genres pool slightly on refresh
+    selected_genres = list(ALL_GENRES)
+    if force_refresh:
+        random.shuffle(selected_genres)
 
     feed = {
-        'trending': search_all_sources('subject:bestsellers', max_results=12),
-        'recommended': search_all_sources('subject:award winning books', max_results=12),
+        'trending': [],
+        'recommended': [],
         'genres': {}
     }
 
-    for genre in genres:
-        feed['genres'][genre] = search_all_sources(
-            f'subject:{genre.lower()}', max_results=8
+    global_seen_ids = set()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        trending_future = executor.submit(
+            search_all_sources, trending_query, 12, start_index=random_offset
         )
+        recommended_future = executor.submit(
+            search_all_sources, recommended_query, 12, start_index=(random_offset + 3)
+        )
+        genre_futures = {
+            executor.submit(
+                search_all_sources, f'subject:{genre.lower()}', 8, start_index=random_offset
+            ): genre
+            for genre in selected_genres
+        }
+
+        # 1. Trending Books
+        try:
+            trending_raw = trending_future.result(timeout=6)
+            for b in trending_raw:
+                bid = b.get('google_book_id')
+                if bid and bid not in global_seen_ids:
+                    global_seen_ids.add(bid)
+                    feed['trending'].append(b)
+        except Exception:
+            feed['trending'] = []
+
+        # 2. Recommended Books (exclude duplicates from trending)
+        try:
+            rec_raw = recommended_future.result(timeout=6)
+            for b in rec_raw:
+                bid = b.get('google_book_id')
+                if bid and bid not in global_seen_ids:
+                    global_seen_ids.add(bid)
+                    feed['recommended'].append(b)
+        except Exception:
+            feed['recommended'] = []
+
+        # 3. Genre Shelves (exclude duplicates across all shelves)
+        for future, genre in genre_futures.items():
+            try:
+                g_raw = future.result(timeout=6)
+                genre_books = []
+                for b in g_raw:
+                    bid = b.get('google_book_id')
+                    if bid and bid not in global_seen_ids:
+                        global_seen_ids.add(bid)
+                        genre_books.append(b)
+                if genre_books:
+                    feed['genres'][genre] = genre_books
+            except Exception:
+                feed['genres'][genre] = []
+
+    if cache_key:
+        set_in_cache(cache_key, feed)
 
     return Response(feed, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def search_google_books(request):
+    """
+    Search books via Google, OpenLibrary, Gutendex, and OpenBD APIs.
+    Supports query aliases: q/search, genre/category, limit/page_size.
+    Supports Politics, Geography, Geopolitics, and all genres.
+    Returns structured results with pagination metadata.
+    """
+    query = request.GET.get('q') or request.GET.get('search') or ''
+    genre = request.GET.get('genre') or request.GET.get('category') or ''
+    try:
+        page = int(request.GET.get('page', 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        limit = int(request.GET.get('limit') or request.GET.get('page_size') or 20)
+    except (TypeError, ValueError):
+        limit = 20
+
+    combined_query = query.strip()
+    if genre and genre.lower() != 'all':
+        # Handle politics, geopolitics, geography properly
+        genre_clean = genre.strip()
+        if combined_query:
+            combined_query = f"{combined_query} subject:{genre_clean}"
+        else:
+            combined_query = f"subject:{genre_clean}"
+
+    if not combined_query:
+        combined_query = "popular books"
+
+    books = search_all_sources(combined_query, max_results=limit, page=page)
+    
+    # Check user shelf status if requested
+    shelf_status = request.GET.get('status')
+    if shelf_status:
+        shelved = {
+            ub.book.google_book_id: ub.status
+            for ub in UserBook.objects.filter(user=None).select_related('book')
+        }
+        for b in books:
+            b['status'] = shelved.get(b['google_book_id'], None)
+
+    response_data = {
+        'results': books,
+        'page': page,
+        'limit': limit,
+        'has_more': len(books) >= limit,
+        'total': len(books),
+    }
+
+    return Response(response_data, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -220,7 +439,7 @@ def save_book_status(request):
     )
 
     user_book, _ = UserBook.objects.update_or_create(
-        user=None,   # consistent with update_book_status
+        user=None,
         book=book,
         defaults={'status': status_val, 'rating': int(rating_val)}
     )
@@ -231,7 +450,7 @@ def save_book_status(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_user_library(request):
-    user_books = UserBook.objects.filter(user=None).select_related('book')
+    user_books = UserBook.objects.filter(user=None).select_related('book').order_by('-updated_at')
     return Response(
         UserBookSerializer(user_books, many=True).data,
         status=status.HTTP_200_OK
@@ -244,26 +463,11 @@ def get_user_shelf(request):
     shelf_status = request.GET.get('status', 'TO_READ').upper()
     user_books = UserBook.objects.filter(
         user=None, status=shelf_status
-    ).select_related('book')
+    ).select_related('book').order_by('-updated_at')
     return Response(
         UserBookSerializer(user_books, many=True).data,
         status=status.HTTP_200_OK
     )
-
-
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def search_google_books(request):
-    """
-    Search books via Google, OpenLibrary, Gutendex, and OpenBD APIs.
-    Endpoint: GET /api/books/search/?q=query
-    """
-    query = request.GET.get('q', '')
-    if not query:
-        return Response([], status=status.HTTP_200_OK)
-
-    books = search_all_sources(query, max_results=20)
-    return Response(books, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
